@@ -32,6 +32,23 @@ The project has two versions:
 - Blend image detail/frequency from nearby frames so replacements sit better in motion.
 - Android output uses the system folder picker, so you can save to SD card folders when the phone exposes them.
 
+## Android APK Download
+
+Download the compiled APK here:
+
+```text
+https://github.com/sslogic/video-frame-swapper/raw/android-fork/releases/video-frame-swapper-debug.apk
+```
+
+Install on Android:
+
+1. Download the APK on the phone.
+2. Open the downloaded file.
+3. If Android blocks it, allow installs from that browser or file manager.
+4. Install `Video Frame Swapper`.
+5. Open the app.
+
+The source for this Android build is in the `android/` folder on this branch.
 ## Get The Code
 
 ```powershell
@@ -154,3 +171,4 @@ For SD cards, use the folder picker. If Android shows the SD card in that picker
 - Large videos take time. The Android app renders frame images first, then encodes the final MP4.
 - The key detector uses chroma analysis. It works best with music-heavy audio and may be less reliable on speech, noise, or very short clips.
 - The Android build uses `com.mrljdx:ffmpeg-kit-full:6.1.4` because the original FFmpegKit packages were retired.
+
