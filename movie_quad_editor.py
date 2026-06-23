@@ -12,7 +12,7 @@ import tkinter as tk
 import cv2
 import imageio_ffmpeg
 import numpy as np
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 
 SLOT_COUNT = 4
@@ -24,6 +24,8 @@ MAJOR_PROFILE = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 
 MINOR_PROFILE = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
 ANALYSIS_SAMPLE_RATE = 22050
 ANALYSIS_SECONDS = 90
+APP_DIR = Path(__file__).resolve().parent
+RECENT_PROJECTS_PATH = APP_DIR / "recent_projects.json"
 
 
 def clamp(value, low, high):
@@ -34,6 +36,26 @@ def image_to_bgr(path, size):
     image = Image.open(path).convert("RGB")
     image = image.resize(size, Image.Resampling.LANCZOS)
     return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+
+def load_recent_projects():
+    try:
+        data = json.loads(RECENT_PROJECTS_PATH.read_text(encoding="utf-8"))
+        return [Path(item) for item in data if Path(item).exists()]
+    except Exception:
+        return []
+
+
+def save_recent_projects(projects):
+    unique = []
+    seen = set()
+    for project in projects:
+        project = Path(project)
+        key = str(project)
+        if key not in seen and project.exists():
+            unique.append(key)
+            seen.add(key)
+    RECENT_PROJECTS_PATH.write_text(json.dumps(unique[:12], indent=2), encoding="utf-8")
 
 
 def shortest_semitone_shift(source_pc, target_pc):
@@ -216,6 +238,7 @@ class MovieQuadEditor(tk.Tk):
         self.imported_image_path = None
         self.imported_image = None
         self.editor_state = None
+        self.recent_projects = load_recent_projects()
         self.music_volume_var = tk.DoubleVar(value=50.0)
         self.source_volume_var = tk.DoubleVar(value=100.0)
         self.music_label_var = tk.StringVar(value="No music track")
@@ -234,19 +257,23 @@ class MovieQuadEditor(tk.Tk):
 
         topbar = ttk.Frame(self, padding=(10, 10, 10, 6))
         topbar.grid(row=0, column=0, sticky="ew")
-        topbar.columnconfigure(4, weight=1)
+        topbar.columnconfigure(7, weight=1)
 
         self.open_button = ttk.Button(topbar, text="Open Video", command=self.open_video)
         self.open_button.grid(row=0, column=0, padx=(0, 8))
         self.save_button = ttk.Button(topbar, text="Save Edits", command=self.save_edits)
         self.save_button.grid(row=0, column=1, padx=(0, 8))
+        self.open_project_button = ttk.Button(topbar, text="Open Project", command=self.open_project)
+        self.open_project_button.grid(row=0, column=2, padx=(0, 8))
+        self.recent_project_button = ttk.Button(topbar, text="Recent Project", command=self.open_recent_project)
+        self.recent_project_button.grid(row=0, column=3, padx=(0, 8))
         self.export_button = ttk.Button(topbar, text="Export Video", command=self.export_video)
-        self.export_button.grid(row=0, column=2, padx=(0, 12))
+        self.export_button.grid(row=0, column=4, padx=(0, 12))
         self.play_button = ttk.Button(topbar, text="Play Preview", command=self.toggle_playback)
-        self.play_button.grid(row=0, column=3, padx=(0, 12))
+        self.play_button.grid(row=0, column=5, padx=(0, 12))
 
         self.video_label = ttk.Label(topbar, text="No video loaded")
-        self.video_label.grid(row=0, column=4, sticky="w")
+        self.video_label.grid(row=0, column=6, columnspan=2, sticky="w")
 
         main = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         main.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
@@ -409,6 +436,8 @@ class MovieQuadEditor(tk.Tk):
 
         self.video_controls = [
             self.save_button,
+            self.open_project_button,
+            self.recent_project_button,
             self.export_button,
             self.play_button,
             self.prev_button,
@@ -480,25 +509,87 @@ class MovieQuadEditor(tk.Tk):
         self.update_info()
         self.show_current_frame()
 
+    def open_video_path(self, path):
+        capture = cv2.VideoCapture(str(path))
+        if not capture.isOpened():
+            messagebox.showerror("Open Video", "Could not open that video.")
+            return False
+        fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        if frame_count <= 0 or width <= 0 or height <= 0:
+            capture.release()
+            messagebox.showerror("Open Video", "Could not read video frame information.")
+            return False
+        if self.capture:
+            self.capture.release()
+        self.stop_playback()
+        self.capture = capture
+        video_path = Path(path)
+        edit_path = video_path.with_suffix(video_path.suffix + ".quad_edits.json")
+        self.state = VideoState(video_path, edit_path, fps, frame_count, width, height)
+        self.video_label.configure(text=str(video_path))
+        self.frame_slider.configure(to=max(0, self.state.output_frame_count - 1))
+        self._set_controls_enabled(True)
+        return True
+
+    def open_project(self):
+        path = filedialog.askopenfilename(
+            title="Open Project",
+            filetypes=[("Frame swap project", "*.quad_edits.json"), ("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if path:
+            self.load_project_file(Path(path))
+
+    def open_recent_project(self):
+        self.recent_projects = load_recent_projects()
+        if not self.recent_projects:
+            messagebox.showinfo("Recent Project", "No recent project found.")
+            return
+        self.load_project_file(self.recent_projects[0])
+
+    def load_project_file(self, project_path):
+        try:
+            data = json.loads(Path(project_path).read_text(encoding="utf-8"))
+            video_path = Path(data["video"])
+        except Exception as exc:
+            messagebox.showerror("Open Project", f"Could not read project file:\n{exc}")
+            return
+        if not video_path.exists():
+            messagebox.showerror("Open Project", f"Video file is missing:\n{video_path}")
+            return
+        if not self.open_video_path(video_path):
+            return
+        self.state.edit_path = Path(project_path)
+        self.apply_project_data(data)
+        self.remember_project(Path(project_path))
+        self.status_var.set(f"Opened project {Path(project_path).name}.")
+        self.show_current_frame()
+
     def load_edits(self):
         if not self.state or not self.state.edit_path.exists():
             return
         try:
             data = json.loads(self.state.edit_path.read_text(encoding="utf-8"))
             if data.get("video") == str(self.state.video_path):
-                self.state.edits = self.normalize_edit_map(data.get("edits", {}))
-                self.state.source_volume = float(data.get("source_volume", 1.0))
-                self.state.music_path = data.get("music_path", "")
-                self.state.music_volume = float(data.get("music_volume", 0.5))
-                self.state.music_tone_match = bool(data.get("music_tone_match", False))
-                self.state.frame_color_blend = bool(data.get("frame_color_blend", True))
-                self.state.frame_color_blend_strength = float(data.get("frame_color_blend_strength", 0.65))
-                self.state.frame_frequency_blend_strength = float(data.get("frame_frequency_blend_strength", 0.35))
-                self.sync_color_blend_controls()
-                self.sync_music_controls()
+                self.apply_project_data(data)
+                self.remember_project(self.state.edit_path)
                 self.status_var.set(f"Loaded {len(self.state.edits)} saved frame swaps.")
         except Exception as exc:
             messagebox.showwarning("Load Edits", f"Could not load saved edit map:\n{exc}")
+
+    def apply_project_data(self, data):
+        self.state.edits = self.normalize_edit_map(data.get("edits", {}))
+        self.state.source_volume = float(data.get("source_volume", 1.0))
+        self.state.music_path = data.get("music_path", "")
+        self.state.music_volume = float(data.get("music_volume", 0.5))
+        self.state.music_tone_match = bool(data.get("music_tone_match", False))
+        self.state.frame_color_blend = bool(data.get("frame_color_blend", True))
+        self.state.frame_color_blend_strength = float(data.get("frame_color_blend_strength", 0.65))
+        self.state.frame_frequency_blend_strength = float(data.get("frame_frequency_blend_strength", 0.35))
+        self.sync_color_blend_controls()
+        self.sync_music_controls()
 
     def normalize_edit_map(self, edits):
         normalized = {}
@@ -533,7 +624,13 @@ class MovieQuadEditor(tk.Tk):
             "frame_frequency_blend_strength": self.state.frame_frequency_blend_strength,
         }
         self.state.edit_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self.remember_project(self.state.edit_path)
         self.status_var.set(f"Saved edits to {self.state.edit_path.name}.")
+
+    def remember_project(self, project_path):
+        project_path = Path(project_path)
+        self.recent_projects = [project_path] + [p for p in load_recent_projects() if p != project_path]
+        save_recent_projects(self.recent_projects)
 
     def sync_music_controls(self):
         if not self.state:
@@ -922,6 +1019,8 @@ class MovieQuadEditor(tk.Tk):
             "imported": imported,
             "background_image": None,
             "draw_layer": Image.new("RGBA", original.size, (0, 0, 0, 0)),
+            "text_objects": [],
+            "selected_text": None,
             "photo": None,
             "preview_scale": 1.0,
             "preview_offset": (0, 0),
@@ -929,6 +1028,13 @@ class MovieQuadEditor(tk.Tk):
             "image_opacity": tk.DoubleVar(value=100.0),
             "brush_size": tk.DoubleVar(value=24.0),
             "paint_opacity": tk.DoubleVar(value=55.0),
+            "text_opacity": tk.DoubleVar(value=100.0),
+            "text_camouflage": tk.DoubleVar(value=0.0),
+            "text_border_enabled": tk.BooleanVar(value=False),
+            "text_size": tk.DoubleVar(value=64.0),
+            "text_thickness": tk.DoubleVar(value=0.0),
+            "text_rotation": tk.DoubleVar(value=0.0),
+            "text_warp": tk.DoubleVar(value=0.0),
             "tool_var": tool_var,
             "text_var": text_var,
             "brush_color": brush_color,
@@ -960,15 +1066,30 @@ class MovieQuadEditor(tk.Tk):
         ttk.Label(panel, text="Text").grid(row=17, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(panel, textvariable=text_var).grid(row=18, column=0, sticky="ew")
         ttk.Button(panel, text="Text Color", command=self.choose_editor_text_color).grid(row=19, column=0, sticky="ew", pady=(6, 0))
+        ttk.Label(panel, text="Text opacity").grid(row=20, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=0, to=100, variable=state["text_opacity"], command=self.update_selected_text_from_controls).grid(row=21, column=0, sticky="ew")
+        ttk.Label(panel, text="Text camouflage").grid(row=22, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=0, to=100, variable=state["text_camouflage"], command=self.update_selected_text_from_controls).grid(row=23, column=0, sticky="ew")
+        ttk.Checkbutton(panel, text="Text border", variable=state["text_border_enabled"], command=self.update_selected_text_from_controls).grid(row=24, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(panel, text="Text size").grid(row=25, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=8, to=300, variable=state["text_size"], command=self.update_selected_text_from_controls).grid(row=26, column=0, sticky="ew")
+        ttk.Label(panel, text="Text thickness").grid(row=27, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=0, to=24, variable=state["text_thickness"], command=self.update_selected_text_from_controls).grid(row=28, column=0, sticky="ew")
+        ttk.Label(panel, text="Text rotation").grid(row=29, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=-180, to=180, variable=state["text_rotation"], command=self.update_selected_text_from_controls).grid(row=30, column=0, sticky="ew")
+        ttk.Label(panel, text="Word warp").grid(row=31, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=-100, to=100, variable=state["text_warp"], command=self.update_selected_text_from_controls).grid(row=32, column=0, sticky="ew")
 
-        ttk.Separator(panel).grid(row=20, column=0, sticky="ew", pady=10)
-        ttk.Button(panel, text="Clear Paint/Text", command=self.clear_editor_paint).grid(row=21, column=0, sticky="ew", pady=(0, 6))
-        ttk.Button(panel, text="Apply To Selected Frame", command=self.apply_editor_to_frame).grid(row=22, column=0, sticky="ew")
+        ttk.Separator(panel).grid(row=33, column=0, sticky="ew", pady=10)
+        ttk.Button(panel, text="Delete Selected Text", command=self.delete_selected_text).grid(row=34, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(panel, text="Clear Paint/Text", command=self.clear_editor_paint).grid(row=35, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(panel, text="Apply To Selected Frame", command=self.apply_editor_to_frame).grid(row=36, column=0, sticky="ew")
 
         panel.columnconfigure(0, weight=1)
         canvas.bind("<Button-1>", self.on_editor_canvas_click)
         canvas.bind("<B1-Motion>", self.on_editor_canvas_drag)
         canvas.bind("<Configure>", lambda _event: self.refresh_editor_preview())
+        text_var.trace_add("write", lambda *_args: self.update_selected_text_from_controls())
         self.refresh_editor_preview()
 
     def editor_canvas_to_image(self, event):
@@ -983,6 +1104,155 @@ class MovieQuadEditor(tk.Tk):
         if x < 0 or y < 0 or x >= width or y >= height:
             return None
         return x, y
+
+    def get_editor_font(self, size):
+        size = max(8, int(size))
+        for path in (Path("C:/Windows/Fonts/arial.ttf"), Path("C:/Windows/Fonts/segoeui.ttf")):
+            if path.exists():
+                return ImageFont.truetype(str(path), size=size)
+        return ImageFont.load_default()
+
+    def render_text_object(self, text_obj):
+        state = self.editor_state
+        width, height = state["original"].size
+        text = text_obj.get("text", "")
+        if not text:
+            return Image.new("RGBA", (width, height), (0, 0, 0, 0)), None
+
+        font = self.get_editor_font(text_obj.get("size", 64))
+        stroke_width = max(0, int(text_obj.get("thickness", 0))) if text_obj.get("border_enabled", False) else 0
+        measure = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+        measure_draw = ImageDraw.Draw(measure)
+        bbox = measure_draw.multiline_textbbox((0, 0), text, font=font, stroke_width=stroke_width)
+        text_width = max(1, bbox[2] - bbox[0])
+        text_height = max(1, bbox[3] - bbox[1])
+        padding = max(24, stroke_width * 4)
+        tile = Image.new("RGBA", (text_width + padding * 2, text_height + padding * 2), (0, 0, 0, 0))
+        tile_draw = ImageDraw.Draw(tile)
+        fill = self.text_fill_color(text_obj, (text_width, text_height))
+        tile_draw.multiline_text(
+            (padding - bbox[0], padding - bbox[1]),
+            text,
+            font=font,
+            fill=fill,
+            stroke_width=stroke_width,
+            stroke_fill=(0, 0, 0, fill[3]),
+            spacing=max(2, int(text_obj.get("size", 64) * 0.18)),
+        )
+
+        warp = clamp(float(text_obj.get("warp", 0)), -100, 100) / 100 * 0.65
+        if abs(warp) > 0.01:
+            x_shift = int(abs(warp) * tile.height)
+            new_width = tile.width + x_shift
+            offset = x_shift if warp < 0 else 0
+            tile = tile.transform(
+                (new_width, tile.height),
+                Image.Transform.AFFINE,
+                (1, warp, -offset, 0, 1, 0),
+                resample=Image.Resampling.BICUBIC,
+            )
+
+        rotation = float(text_obj.get("rotation", 0))
+        if abs(rotation) > 0.01:
+            tile = tile.rotate(rotation, expand=True, resample=Image.Resampling.BICUBIC)
+
+        x = int(text_obj.get("x", 0))
+        y = int(text_obj.get("y", 0))
+        layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        layer.paste(tile, (x, y), tile)
+        return layer, (x, y, x + tile.width, y + tile.height)
+
+    def text_fill_color(self, text_obj, text_size):
+        fill = self.rgba_from_hex(text_obj.get("color", "#ffffff"), text_obj.get("opacity", 100))
+        camouflage = clamp(float(text_obj.get("camouflage", 0)), 0, 100) / 100
+        if camouflage <= 0:
+            return fill
+        sample = self.sample_editor_color_under_text(text_obj, text_size)
+        blended_rgb = tuple(int(fill[index] * (1 - camouflage) + sample[index] * camouflage) for index in range(3))
+        return (*blended_rgb, fill[3])
+
+    def sample_editor_color_under_text(self, text_obj, text_size):
+        state = self.editor_state
+        if not state:
+            return (255, 255, 255)
+        base = self.compose_editor_base(include_draw_layer=True).convert("RGB")
+        width, height = base.size
+        x = int(text_obj.get("x", 0))
+        y = int(text_obj.get("y", 0))
+        text_width, text_height = text_size
+        x1 = max(0, min(width, x))
+        y1 = max(0, min(height, y))
+        x2 = max(x1 + 1, min(width, x + max(1, text_width)))
+        y2 = max(y1 + 1, min(height, y + max(1, text_height)))
+        if x1 >= width or y1 >= height:
+            return (255, 255, 255)
+        crop = np.array(base.crop((x1, y1, x2, y2)))
+        if crop.size == 0:
+            return (255, 255, 255)
+        average = crop.reshape(-1, 3).mean(axis=0)
+        return tuple(int(channel) for channel in average)
+
+    def find_text_at(self, point):
+        state = self.editor_state
+        if not state:
+            return None
+        x, y = point
+        for text_obj in reversed(state["text_objects"]):
+            _layer, bbox = self.render_text_object(text_obj)
+            if bbox and bbox[0] <= x <= bbox[2] and bbox[1] <= y <= bbox[3]:
+                return text_obj
+        return None
+
+    def sync_text_controls_from_selected(self):
+        state = self.editor_state
+        text_obj = state.get("selected_text") if state else None
+        if not text_obj:
+            return
+        state["text_var"].set(text_obj.get("text", ""))
+        state["text_color"]["value"] = text_obj.get("color", "#ffffff")
+        state["text_opacity"].set(text_obj.get("opacity", 100))
+        state["text_camouflage"].set(text_obj.get("camouflage", 0))
+        state["text_border_enabled"].set(text_obj.get("border_enabled", False))
+        state["text_size"].set(text_obj.get("size", 64))
+        state["text_thickness"].set(text_obj.get("thickness", 0))
+        state["text_rotation"].set(text_obj.get("rotation", 0))
+        state["text_warp"].set(text_obj.get("warp", 0))
+
+    def update_selected_text_from_controls(self, _value=None):
+        state = self.editor_state
+        text_obj = state.get("selected_text") if state else None
+        if not text_obj:
+            return
+        text_obj["text"] = state["text_var"].get()
+        text_obj["color"] = state["text_color"]["value"]
+        text_obj["opacity"] = state["text_opacity"].get()
+        text_obj["camouflage"] = state["text_camouflage"].get()
+        text_obj["border_enabled"] = state["text_border_enabled"].get()
+        text_obj["size"] = state["text_size"].get()
+        text_obj["thickness"] = state["text_thickness"].get()
+        text_obj["rotation"] = state["text_rotation"].get()
+        text_obj["warp"] = state["text_warp"].get()
+        self.refresh_editor_preview()
+
+    def draw_selected_text_box(self):
+        state = self.editor_state
+        text_obj = state.get("selected_text") if state else None
+        if not text_obj:
+            return
+        _layer, bbox = self.render_text_object(text_obj)
+        if not bbox:
+            return
+        ox, oy = state["preview_offset"]
+        scale = state["preview_scale"]
+        x1 = ox + bbox[0] * scale
+        y1 = oy + bbox[1] * scale
+        x2 = ox + bbox[2] * scale
+        y2 = oy + bbox[3] * scale
+        canvas = state["canvas"]
+        canvas.create_rectangle(x1, y1, x2, y2, outline="#31d6ff", width=2, dash=(6, 4))
+        handle = 5
+        for x, y in ((x1, y1), (x2, y1), (x1, y2), (x2, y2)):
+            canvas.create_rectangle(x - handle, y - handle, x + handle, y + handle, fill="#31d6ff", outline="#0b3a44")
 
     def refresh_editor_preview(self):
         state = self.editor_state
@@ -999,8 +1269,16 @@ class MovieQuadEditor(tk.Tk):
         state["photo"] = ImageTk.PhotoImage(preview)
         canvas.delete("all")
         canvas.create_image(state["preview_offset"][0], state["preview_offset"][1], anchor="nw", image=state["photo"])
+        self.draw_selected_text_box()
 
     def compose_editor_image(self):
+        composed = self.compose_editor_base(include_draw_layer=True)
+        for text_obj in self.editor_state["text_objects"]:
+            text_layer, _bbox = self.render_text_object(text_obj)
+            composed = Image.alpha_composite(composed, text_layer)
+        return composed
+
+    def compose_editor_base(self, include_draw_layer):
         state = self.editor_state
         width, height = state["original"].size
         background = Image.new("RGBA", (width, height), state["bg_color"]["value"])
@@ -1012,7 +1290,9 @@ class MovieQuadEditor(tk.Tk):
         imported.putalpha(int(clamp(state["image_opacity"].get(), 0, 100) / 100 * 255))
         composed = Image.alpha_composite(background, frame)
         composed = Image.alpha_composite(composed, imported)
-        return Image.alpha_composite(composed, state["draw_layer"])
+        if include_draw_layer:
+            composed = Image.alpha_composite(composed, state["draw_layer"])
+        return composed
 
     def choose_editor_background_color(self):
         state = self.editor_state
@@ -1054,6 +1334,7 @@ class MovieQuadEditor(tk.Tk):
         color = colorchooser.askcolor(color=state["text_color"]["value"], title="Text Color")
         if color and color[1]:
             state["text_color"]["value"] = color[1]
+            self.update_selected_text_from_controls()
 
     def rgba_from_hex(self, hex_color, opacity_percent):
         hex_color = hex_color.lstrip("#")
@@ -1066,16 +1347,41 @@ class MovieQuadEditor(tk.Tk):
         if not state or point is None:
             return
         if state["tool_var"].get() == "text":
-            draw = ImageDraw.Draw(state["draw_layer"])
-            draw.text(point, state["text_var"].get(), fill=self.rgba_from_hex(state["text_color"]["value"], state["paint_opacity"].get()))
+            selected = self.find_text_at(point)
+            if selected:
+                state["selected_text"] = selected
+                self.sync_text_controls_from_selected()
+            else:
+                selected = {
+                    "text": state["text_var"].get(),
+                    "x": point[0],
+                    "y": point[1],
+                    "color": state["text_color"]["value"],
+                    "opacity": state["text_opacity"].get(),
+                    "camouflage": state["text_camouflage"].get(),
+                    "border_enabled": state["text_border_enabled"].get(),
+                    "size": state["text_size"].get(),
+                    "thickness": state["text_thickness"].get(),
+                    "rotation": state["text_rotation"].get(),
+                    "warp": state["text_warp"].get(),
+                }
+                state["text_objects"].append(selected)
+                state["selected_text"] = selected
             self.refresh_editor_preview()
         else:
+            state["selected_text"] = None
             self.paint_editor_point(point)
 
     def on_editor_canvas_drag(self, event):
         state = self.editor_state
         point = self.editor_canvas_to_image(event)
-        if not state or point is None or state["tool_var"].get() == "text":
+        if not state or point is None:
+            return
+        if state["tool_var"].get() == "text":
+            selected = state.get("selected_text")
+            if selected:
+                selected["x"], selected["y"] = point
+                self.refresh_editor_preview()
             return
         self.paint_editor_point(point)
 
@@ -1104,6 +1410,17 @@ class MovieQuadEditor(tk.Tk):
         if not state:
             return
         state["draw_layer"] = Image.new("RGBA", state["original"].size, (0, 0, 0, 0))
+        state["text_objects"] = []
+        state["selected_text"] = None
+        self.refresh_editor_preview()
+
+    def delete_selected_text(self):
+        state = self.editor_state
+        if not state or not state.get("selected_text"):
+            return
+        selected = state["selected_text"]
+        state["text_objects"] = [text_obj for text_obj in state["text_objects"] if text_obj is not selected]
+        state["selected_text"] = None
         self.refresh_editor_preview()
 
     def apply_editor_to_frame(self):
