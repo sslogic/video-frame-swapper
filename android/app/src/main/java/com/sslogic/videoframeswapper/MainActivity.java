@@ -61,11 +61,11 @@ public class MainActivity extends Activity {
     private Uri musicUri;
     private Uri outputTreeUri;
     private final Map<String, Uri> replacements = new HashMap<>();
-    private final ImageView[] slotViews = new ImageView[SLOT_COUNT];
-    private final Button[] slotButtons = new Button[SLOT_COUNT];
+    private ImageView previewView;
     private TextView status;
     private TextView info;
     private SeekBar frameSeek;
+    private SeekBar timelineZoomSeek;
     private ProgressBar progress;
     private EditText outputName;
     private CheckBox keyMatchCheck;
@@ -74,8 +74,7 @@ public class MainActivity extends Activity {
     private SeekBar musicVolumeSeek;
     private SeekBar colorBlendSeek;
     private SeekBar frequencyBlendSeek;
-    private int currentFrame = 0;
-    private int selectedSlot = 0;
+    private int currentOutputFrame = 0;
     private int frameCount = 1;
     private double fps = 30.0;
     private long durationMs = 0;
@@ -116,57 +115,34 @@ public class MainActivity extends Activity {
         top.addView(pickFolder, weight());
         root.addView(top);
 
-        GridLayout grid = new GridLayout(this);
-        grid.setColumnCount(2);
-        grid.setPadding(0, 20, 0, 12);
-        for (int i = 0; i < SLOT_COUNT; i++) {
-            final int slot = i;
-            ImageView view = new ImageView(this);
-            view.setBackgroundColor(Color.rgb(24, 24, 24));
-            view.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            view.setAdjustViewBounds(true);
-            view.setMinimumHeight(360);
-            view.setPadding(6, 6, 6, 6);
-            view.setOnClickListener(v -> selectSlot(slot));
-            slotViews[i] = view;
-            GridLayout.LayoutParams params = new GridLayout.LayoutParams(GridLayout.spec(i / 2), GridLayout.spec(i % 2));
-            params.width = getResources().getDisplayMetrics().widthPixels / 2 - 36;
-            params.height = Math.max(260, params.width * 9 / 16);
-            params.setMargins(4, 4, 4, 4);
-            grid.addView(view, params);
-        }
-        root.addView(grid, matchWrap());
-
-        LinearLayout slots = row();
-        for (int i = 0; i < SLOT_COUNT; i++) {
-            final int slot = i;
-            Button slotButton = button("Slot " + (i + 1));
-            slotButton.setOnClickListener(v -> selectSlot(slot));
-            slotButtons[i] = slotButton;
-            slots.addView(slotButton, weight());
-        }
-        root.addView(slots);
+        previewView = new ImageView(this);
+        previewView.setBackgroundColor(Color.rgb(24, 24, 24));
+        previewView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        previewView.setAdjustViewBounds(true);
+        previewView.setMinimumHeight(520);
+        previewView.setPadding(6, 6, 6, 6);
+        root.addView(previewView, matchWrap());
 
         LinearLayout editRow = row();
-        Button replace = button("Replace Selected Slot");
+        Button replace = button("Replace Frame");
         replace.setOnClickListener(v -> pick(PICK_REPLACEMENT, "image/*"));
-        Button clear = button("Clear Slot");
+        Button clear = button("Clear Frame");
         clear.setOnClickListener(v -> {
-            replacements.remove(key(currentFrame, selectedSlot));
+            replacements.remove(key(currentOutputFrame));
             refreshPreview();
         });
         editRow.addView(replace, weight());
         editRow.addView(clear, weight());
         root.addView(editRow);
 
-        TextView frameLabel = label("Frame");
+        TextView frameLabel = label("Output Frame Timeline");
         root.addView(frameLabel);
         frameSeek = new SeekBar(this);
         frameSeek.setMax(0);
         frameSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar seekBar, int progressValue, boolean fromUser) {
                 if (fromUser) {
-                    currentFrame = progressValue;
+                    currentOutputFrame = progressValue;
                     refreshPreview();
                 }
             }
@@ -174,6 +150,13 @@ public class MainActivity extends Activity {
             @Override public void onStopTrackingTouch(SeekBar seekBar) {}
         });
         root.addView(frameSeek, matchWrap());
+
+        TextView zoomLabel = label("Timeline Zoom");
+        root.addView(zoomLabel);
+        timelineZoomSeek = new SeekBar(this);
+        timelineZoomSeek.setMax(79);
+        timelineZoomSeek.setProgress(0);
+        root.addView(timelineZoomSeek, matchWrap());
 
         TextView sourceVolumeLabel = label("Original Soundtrack Volume");
         root.addView(sourceVolumeLabel);
@@ -294,12 +277,11 @@ public class MainActivity extends Activity {
             videoUri = uri;
             replacements.clear();
             loadVideoMetadata();
-            currentFrame = 0;
-            selectedSlot = 0;
+            currentOutputFrame = 0;
         } else if (requestCode == PICK_MUSIC) {
             musicUri = uri;
         } else if (requestCode == PICK_REPLACEMENT) {
-            replacements.put(key(currentFrame, selectedSlot), uri);
+            replacements.put(key(currentOutputFrame), uri);
         } else if (requestCode == PICK_OUTPUT_TREE) {
             outputTreeUri = uri;
         }
@@ -319,7 +301,7 @@ public class MainActivity extends Activity {
             }
             videoWidth = (int) parseLong(retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH), 1280);
             videoHeight = (int) parseLong(retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT), 720);
-            frameSeek.setMax(Math.max(0, frameCount - 1));
+            frameSeek.setMax(Math.max(0, outputFrameCount() - 1));
         } catch (Exception exc) {
             setStatus("Could not read video metadata: " + exc.getMessage());
         } finally {
@@ -341,42 +323,38 @@ public class MainActivity extends Activity {
         String musicName = musicUri == null ? "none" : displayName(musicUri);
         String folder = outputTreeUri == null ? "none" : "chosen";
         info.setText(String.format(Locale.US,
-                "Video: %s\nMusic: %s\nSave folder: %s\nFrame: %d / %d\nSelected slot: %d\nFPS: %.3f -> %.3f\nReplaced slots: %d",
-                videoName, musicName, folder, currentFrame, frameCount, selectedSlot + 1, fps, fps * SLOT_COUNT, replacements.size()));
+                "Video: %s\nMusic: %s\nSave folder: %s\nOutput frame: %d / %d\nSource frame: %d / %d\nFPS: %.3f -> %.3f\nSwapped frames: %d",
+                videoName, musicName, folder, currentOutputFrame, outputFrameCount() - 1,
+                sourceFrameForOutput(currentOutputFrame), frameCount - 1, fps, fps * SLOT_COUNT, replacements.size()));
     }
 
     private void refreshPreview() {
         if (videoUri == null) {
-            for (int i = 0; i < SLOT_COUNT; i++) {
-                slotViews[i].setImageBitmap(null);
-                slotViews[i].setBackgroundColor(i == selectedSlot ? Color.rgb(37, 99, 235) : Color.rgb(24, 24, 24));
-            }
+            previewView.setImageBitmap(null);
+            previewView.setBackgroundColor(Color.rgb(24, 24, 24));
             return;
         }
         MediaMetadataRetriever retriever = new MediaMetadataRetriever();
         try {
             retriever.setDataSource(this, videoUri);
-            Bitmap source = frameAt(retriever, currentFrame);
-            Bitmap previous = frameAt(retriever, Math.max(0, currentFrame - 1));
-            Bitmap next = frameAt(retriever, Math.min(frameCount - 1, currentFrame + 1));
-            for (int i = 0; i < SLOT_COUNT; i++) {
-                Bitmap preview = source;
-                Uri replacement = replacements.get(key(currentFrame, i));
-                if (replacement != null) {
-                    preview = loadBitmap(replacement, videoWidth, videoHeight);
-                    if (colorBlendCheck != null && colorBlendCheck.isChecked()) {
-                        preview = colorBlend(
-                                preview,
-                                previous,
-                                next,
-                                colorBlendSeek.getProgress() / 100.0,
-                                frequencyBlendSeek.getProgress() / 100.0);
-                    }
+            int sourceFrame = sourceFrameForOutput(currentOutputFrame);
+            Bitmap preview = frameAt(retriever, sourceFrame);
+            Bitmap previous = frameAt(retriever, Math.max(0, sourceFrame - 1));
+            Bitmap next = frameAt(retriever, Math.min(frameCount - 1, sourceFrame + 1));
+            Uri replacement = replacements.get(key(currentOutputFrame));
+            if (replacement != null) {
+                preview = loadBitmap(replacement, videoWidth, videoHeight);
+                if (colorBlendCheck != null && colorBlendCheck.isChecked()) {
+                    preview = colorBlend(
+                            preview,
+                            previous,
+                            next,
+                            colorBlendSeek.getProgress() / 100.0,
+                            frequencyBlendSeek.getProgress() / 100.0);
                 }
-                slotViews[i].setImageBitmap(preview);
-                slotViews[i].setBackgroundColor(i == selectedSlot ? Color.rgb(37, 99, 235) : Color.rgb(24, 24, 24));
-                slotButtons[i].setEnabled(true);
             }
+            previewView.setImageBitmap(preview);
+            frameSeek.setProgress(currentOutputFrame);
         } catch (Exception exc) {
             setStatus("Preview failed: " + exc.getMessage());
         } finally {
@@ -400,13 +378,16 @@ public class MainActivity extends Activity {
         return Bitmap.createScaledBitmap(bitmap, width, height, true);
     }
 
-    private void selectSlot(int slot) {
-        selectedSlot = slot;
-        refreshUi();
+    private int outputFrameCount() {
+        return Math.max(1, frameCount * SLOT_COUNT);
     }
 
-    private String key(int frame, int slot) {
-        return frame + ":" + slot;
+    private int sourceFrameForOutput(int outputFrame) {
+        return Math.max(0, Math.min(frameCount - 1, outputFrame / SLOT_COUNT));
+    }
+
+    private String key(int outputFrame) {
+        return String.valueOf(outputFrame);
     }
 
     private void exportVideo() {
@@ -454,8 +435,9 @@ public class MainActivity extends Activity {
                 Bitmap previous = frameAt(retriever, Math.max(0, frame - 1));
                 Bitmap next = frameAt(retriever, Math.min(frameCount - 1, frame + 1));
                 for (int slot = 0; slot < SLOT_COUNT; slot++) {
+                    int outputFrame = frame * SLOT_COUNT + slot;
                     Bitmap out = source;
-                    Uri replacement = replacements.get(key(frame, slot));
+                    Uri replacement = replacements.get(key(outputFrame));
                     if (replacement != null) {
                         out = loadBitmap(replacement, videoWidth, videoHeight);
                         if (colorBlendCheck.isChecked()) {
