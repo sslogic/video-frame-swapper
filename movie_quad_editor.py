@@ -254,10 +254,22 @@ class MovieQuadEditor(tk.Tk):
         timeline_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         timeline_frame.columnconfigure(1, weight=1)
         ttk.Button(timeline_frame, text="-", width=3, command=lambda: self.adjust_timeline_zoom(0.5)).grid(row=0, column=0, padx=(0, 6))
-        self.timeline_canvas = tk.Canvas(timeline_frame, height=TIMELINE_HEIGHT, bg="#202020", highlightthickness=0)
+        self.timeline_canvas = tk.Canvas(
+            timeline_frame,
+            height=TIMELINE_HEIGHT,
+            bg="#202020",
+            highlightthickness=1,
+            highlightbackground="#3f3f46",
+            highlightcolor="#48a6ff",
+            takefocus=True,
+        )
         self.timeline_canvas.grid(row=0, column=1, sticky="ew")
         self.timeline_canvas.bind("<Button-1>", self.on_timeline_click)
         self.timeline_canvas.bind("<B1-Motion>", self.on_timeline_click)
+        self.timeline_canvas.bind("<FocusIn>", lambda _event: self.draw_timeline())
+        self.timeline_canvas.bind("<FocusOut>", lambda _event: self.draw_timeline())
+        for key in ("<Left>", "<KP_Left>", "<Right>", "<KP_Right>", "<Up>", "<KP_Up>", "<Down>", "<KP_Down>"):
+            self.timeline_canvas.bind(key, self.on_timeline_key)
         ttk.Button(timeline_frame, text="+", width=3, command=lambda: self.adjust_timeline_zoom(2.0)).grid(row=0, column=2, padx=(6, 0))
 
         controls = ttk.Frame(main, padding=10)
@@ -617,25 +629,76 @@ class MovieQuadEditor(tk.Tk):
         current = self.state.current_output_frame
         start = clamp(current - visible // 2, 0, max(0, total - visible))
         end = min(total, start + visible)
-        canvas.create_rectangle(0, 0, width, height, fill="#202020", outline="")
-        for i in range(start, end):
-            x = int((i - start) / max(1, end - start) * width)
-            x2 = int((i + 1 - start) / max(1, end - start) * width)
-            if str(i) in self.state.edits:
-                fill = "#f59e0b"
-            elif i % SLOT_COUNT == 0:
-                fill = "#4b5563"
-            else:
-                fill = "#374151"
-            canvas.create_rectangle(x, 28, max(x + 1, x2), 62, fill=fill, outline="")
+        focused = self.focus_get() == canvas
+        canvas.create_rectangle(0, 0, width, height, fill="#202020", outline="#48a6ff" if focused else "")
+        cell_width = width / max(1, end - start)
+        show_all_copies = visible <= 96 or cell_width >= 8
+        show_original_frames = not show_all_copies and (visible <= self.state.frame_count * 2 or cell_width >= 2)
+        if show_all_copies:
+            self.draw_output_frame_cells(canvas, start, end, width)
+        elif show_original_frames:
+            self.draw_original_frame_cells(canvas, start, end, width)
+        else:
+            self.draw_timeline_overview(canvas, start, end, width)
         play_x = int((current - start) / max(1, end - start) * width)
         canvas.create_line(play_x, 10, play_x, height - 8, fill="#48a6ff", width=3)
         canvas.create_text(8, 10, anchor="nw", text=f"{start} - {end - 1} / {total - 1}", fill="#e5e7eb")
+        hint = "keys: left/right step, up/down zoom" if focused else "click timeline for keys"
         canvas.create_text(width - 8, 10, anchor="ne", text=f"zoom {zoom:.1f}x", fill="#e5e7eb")
+        canvas.create_text(width // 2, height - 12, text=hint, fill="#cbd5e1")
+
+    def draw_output_frame_cells(self, canvas, start, end, width):
+        count = max(1, end - start)
+        for output_frame in range(start, end):
+            x = int((output_frame - start) / count * width)
+            x2 = int((output_frame + 1 - start) / count * width)
+            copy_index = output_frame % SLOT_COUNT
+            swapped = str(output_frame) in self.state.edits
+            if swapped:
+                fill = "#f59e0b"
+            elif copy_index == 0:
+                fill = "#64748b"
+            else:
+                fill = "#374151"
+            canvas.create_rectangle(x, 28, max(x + 1, x2), 64, fill=fill, outline="#111827")
+            if x2 - x >= 24:
+                label = "O" if copy_index == 0 else str(copy_index + 1)
+                canvas.create_text((x + x2) // 2, 40, text=label, fill="#f8fafc", font=("Segoe UI", 9, "bold"))
+                canvas.create_text((x + x2) // 2, 56, text=str(output_frame), fill="#e5e7eb", font=("Segoe UI", 7))
+            elif x2 - x >= 12:
+                label = "O" if copy_index == 0 else str(copy_index + 1)
+                canvas.create_text((x + x2) // 2, 46, text=label, fill="#f8fafc", font=("Segoe UI", 8))
+
+    def draw_original_frame_cells(self, canvas, start, end, width):
+        first_source = start // SLOT_COUNT
+        last_source = min(self.state.frame_count - 1, (end - 1) // SLOT_COUNT)
+        source_count = max(1, last_source - first_source + 1)
+        for source_frame in range(first_source, last_source + 1):
+            output_start = source_frame * SLOT_COUNT
+            output_end = output_start + SLOT_COUNT
+            x = int((max(output_start, start) - start) / max(1, end - start) * width)
+            x2 = int((min(output_end, end) - start) / max(1, end - start) * width)
+            swapped = any(str(i) in self.state.edits for i in range(output_start, output_end))
+            fill = "#f59e0b" if swapped else "#475569"
+            canvas.create_rectangle(x, 30, max(x + 1, x2), 62, fill=fill, outline="#1f2937")
+            if x2 - x >= 26:
+                canvas.create_text((x + x2) // 2, 46, text=str(source_frame), fill="#f8fafc", font=("Segoe UI", 8))
+
+    def draw_timeline_overview(self, canvas, start, end, width):
+        canvas.create_rectangle(0, 34, width, 58, fill="#334155", outline="")
+        for output_frame_text in self.state.edits:
+            try:
+                output_frame = int(output_frame_text)
+            except ValueError:
+                continue
+            if start <= output_frame < end:
+                x = int((output_frame - start) / max(1, end - start) * width)
+                canvas.create_line(x, 28, x, 66, fill="#f59e0b", width=2)
 
     def on_timeline_click(self, event):
         if not self.state:
             return
+        self.timeline_canvas.focus_set()
         width = max(1, self.timeline_canvas.winfo_width())
         total = max(1, self.state.output_frame_count)
         zoom = max(1.0, self.timeline_zoom_var.get())
@@ -645,12 +708,27 @@ class MovieQuadEditor(tk.Tk):
         self.state.current_output_frame = clamp(frame, 0, total - 1)
         self.show_current_frame()
 
+    def on_timeline_key(self, event):
+        if not self.state:
+            return "break"
+        if event.keysym in ("Left", "KP_Left"):
+            self.move_frame(-1)
+        elif event.keysym in ("Right", "KP_Right"):
+            self.move_frame(1)
+        elif event.keysym in ("Up", "KP_Up"):
+            self.adjust_timeline_zoom(1.35)
+        elif event.keysym in ("Down", "KP_Down"):
+            self.adjust_timeline_zoom(1 / 1.35)
+        return "break"
+
     def update_info(self):
         if not self.state:
             self.info_var.set("")
             return
         override = self.state.frame_override()
         frame_text = "swapped image" if override else "source video frame"
+        copy_number = self.state.current_output_frame % SLOT_COUNT + 1
+        copy_text = "original copy" if copy_number == 1 else f"copy {copy_number}"
         self.info_var.set(
             f"Source frames: {self.state.frame_count}\n"
             f"Source FPS: {self.state.fps:.3f}\n"
@@ -658,7 +736,8 @@ class MovieQuadEditor(tk.Tk):
             f"Export FPS: {self.state.export_fps:.3f}\n"
             f"Duration: {self.state.duration:.2f} seconds\n"
             f"Swapped frames: {len(self.state.edits)}\n"
-            f"Current frame: {frame_text}\n"
+            f"Current frame: {self.state.current_output_frame} ({copy_text} of source {self.state.source_frame_for_output()})\n"
+            f"Frame content: {frame_text}\n"
             f"Music track: {'yes' if self.state.music_path else 'no'}\n"
             f"Color blend: {'on' if self.state.frame_color_blend else 'off'}"
         )

@@ -23,6 +23,7 @@ The project has two parts:
 - Zoom in and out on a video timeline.
 - Move to an exact output frame.
 - Replace one frame with an image.
+- At max zoom, see the original frame cell followed by copies `2`, `3`, and `4`.
 - Export a same-length MP4 with four frames for every original frame.
 - Keep the original audio when possible.
 - Add a second music track.
@@ -78,6 +79,17 @@ Nothing is installed globally.
 12. Click `Export Video`.
 
 The editor saves a `.quad_edits.json` file next to the video. That file stores the swapped frame numbers and audio settings for that video.
+
+Timeline keys:
+
+- Click the timeline first so it has focus.
+- `Left` steps back one frame.
+- `Right` steps forward one frame.
+- `Up` zooms in.
+- `Down` zooms out.
+- When zoomed in far enough, the timeline shows every generated frame cell.
+- `O` means the first/original generated frame for that source frame.
+- `2`, `3`, and `4` are the copied generated frames.
 
 ## Android APK Download
 
