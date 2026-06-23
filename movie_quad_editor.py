@@ -986,7 +986,8 @@ class MovieQuadEditor(tk.Tk):
             if self.imported_image is None:
                 return
 
-        original_frame = self.read_frame(self.state.source_frame_for_output())
+        editor_output_frame = self.state.current_output_frame
+        original_frame = self.read_frame(self.state.source_frame_for_output(editor_output_frame))
         if original_frame is None:
             messagebox.showerror("Edit Imported", "Could not read the frame being replaced.")
             return
@@ -1015,12 +1016,18 @@ class MovieQuadEditor(tk.Tk):
         state = {
             "window": window,
             "canvas": canvas,
+            "editor_output_frame": editor_output_frame,
             "original": original,
             "imported": imported,
             "background_image": None,
             "draw_layer": Image.new("RGBA", original.size, (0, 0, 0, 0)),
             "text_objects": [],
             "selected_text": None,
+            "undo_stack": [],
+            "is_restoring": False,
+            "control_undo_active": False,
+            "paint_undo_active": False,
+            "text_drag_undo_active": False,
             "photo": None,
             "preview_scale": 1.0,
             "preview_offset": (0, 0),
@@ -1045,9 +1052,9 @@ class MovieQuadEditor(tk.Tk):
 
         ttk.Label(panel, text="Layer Opacity").grid(row=0, column=0, sticky="w")
         ttk.Label(panel, text="Original frame").grid(row=1, column=0, sticky="w")
-        ttk.Scale(panel, from_=0, to=100, variable=state["frame_opacity"], command=lambda _v: self.refresh_editor_preview()).grid(row=2, column=0, sticky="ew")
+        ttk.Scale(panel, from_=0, to=100, variable=state["frame_opacity"], command=self.on_editor_layer_control_changed).grid(row=2, column=0, sticky="ew")
         ttk.Label(panel, text="Imported image").grid(row=3, column=0, sticky="w", pady=(8, 0))
-        ttk.Scale(panel, from_=0, to=100, variable=state["image_opacity"], command=lambda _v: self.refresh_editor_preview()).grid(row=4, column=0, sticky="ew")
+        ttk.Scale(panel, from_=0, to=100, variable=state["image_opacity"], command=self.on_editor_layer_control_changed).grid(row=4, column=0, sticky="ew")
 
         ttk.Separator(panel).grid(row=5, column=0, sticky="ew", pady=10)
         ttk.Button(panel, text="Background Color", command=self.choose_editor_background_color).grid(row=6, column=0, sticky="ew", pady=(0, 6))
@@ -1081,15 +1088,18 @@ class MovieQuadEditor(tk.Tk):
         ttk.Scale(panel, from_=-100, to=100, variable=state["text_warp"], command=self.update_selected_text_from_controls).grid(row=32, column=0, sticky="ew")
 
         ttk.Separator(panel).grid(row=33, column=0, sticky="ew", pady=10)
-        ttk.Button(panel, text="Delete Selected Text", command=self.delete_selected_text).grid(row=34, column=0, sticky="ew", pady=(0, 6))
-        ttk.Button(panel, text="Clear Paint/Text", command=self.clear_editor_paint).grid(row=35, column=0, sticky="ew", pady=(0, 6))
-        ttk.Button(panel, text="Apply To Selected Frame", command=self.apply_editor_to_frame).grid(row=36, column=0, sticky="ew")
+        ttk.Button(panel, text="Undo", command=self.undo_editor_change).grid(row=34, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(panel, text="Delete Selected Text", command=self.delete_selected_text).grid(row=35, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(panel, text="Clear Paint/Text", command=self.clear_editor_paint).grid(row=36, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(panel, text="Apply Changes", command=self.apply_editor_to_frame).grid(row=37, column=0, sticky="ew")
 
         panel.columnconfigure(0, weight=1)
         canvas.bind("<Button-1>", self.on_editor_canvas_click)
         canvas.bind("<B1-Motion>", self.on_editor_canvas_drag)
+        canvas.bind("<ButtonRelease-1>", self.finish_editor_action)
         canvas.bind("<Configure>", lambda _event: self.refresh_editor_preview())
         text_var.trace_add("write", lambda *_args: self.update_selected_text_from_controls())
+        window.protocol("WM_DELETE_WINDOW", self.close_import_editor)
         self.refresh_editor_preview()
 
     def editor_canvas_to_image(self, event):
@@ -1104,6 +1114,90 @@ class MovieQuadEditor(tk.Tk):
         if x < 0 or y < 0 or x >= width or y >= height:
             return None
         return x, y
+
+    def editor_snapshot(self):
+        state = self.editor_state
+        if not state:
+            return None
+        selected = state.get("selected_text")
+        selected_index = None
+        if selected in state["text_objects"]:
+            selected_index = state["text_objects"].index(selected)
+        return {
+            "draw_layer": state["draw_layer"].copy(),
+            "text_objects": [dict(text_obj) for text_obj in state["text_objects"]],
+            "selected_index": selected_index,
+            "background_image": state["background_image"].copy() if state["background_image"] is not None else None,
+            "bg_color": state["bg_color"]["value"],
+            "brush_color": state["brush_color"]["value"],
+            "text_color": state["text_color"]["value"],
+            "frame_opacity": state["frame_opacity"].get(),
+            "image_opacity": state["image_opacity"].get(),
+            "brush_size": state["brush_size"].get(),
+            "paint_opacity": state["paint_opacity"].get(),
+            "text_opacity": state["text_opacity"].get(),
+            "text_camouflage": state["text_camouflage"].get(),
+            "text_border_enabled": state["text_border_enabled"].get(),
+            "text_size": state["text_size"].get(),
+            "text_thickness": state["text_thickness"].get(),
+            "text_rotation": state["text_rotation"].get(),
+            "text_warp": state["text_warp"].get(),
+            "text_value": state["text_var"].get(),
+        }
+
+    def push_editor_undo(self):
+        state = self.editor_state
+        if not state or state.get("is_restoring"):
+            return
+        snapshot = self.editor_snapshot()
+        if snapshot:
+            state["undo_stack"].append(snapshot)
+            state["undo_stack"] = state["undo_stack"][-50:]
+
+    def restore_editor_snapshot(self, snapshot):
+        state = self.editor_state
+        if not state or not snapshot:
+            return
+        state["is_restoring"] = True
+        try:
+            state["draw_layer"] = snapshot["draw_layer"].copy()
+            state["text_objects"] = [dict(text_obj) for text_obj in snapshot["text_objects"]]
+            selected_index = snapshot["selected_index"]
+            state["selected_text"] = state["text_objects"][selected_index] if selected_index is not None and selected_index < len(state["text_objects"]) else None
+            state["background_image"] = snapshot["background_image"].copy() if snapshot["background_image"] is not None else None
+            state["bg_color"]["value"] = snapshot["bg_color"]
+            state["brush_color"]["value"] = snapshot["brush_color"]
+            state["text_color"]["value"] = snapshot["text_color"]
+            state["frame_opacity"].set(snapshot["frame_opacity"])
+            state["image_opacity"].set(snapshot["image_opacity"])
+            state["brush_size"].set(snapshot["brush_size"])
+            state["paint_opacity"].set(snapshot["paint_opacity"])
+            state["text_opacity"].set(snapshot["text_opacity"])
+            state["text_camouflage"].set(snapshot["text_camouflage"])
+            state["text_border_enabled"].set(snapshot["text_border_enabled"])
+            state["text_size"].set(snapshot["text_size"])
+            state["text_thickness"].set(snapshot["text_thickness"])
+            state["text_rotation"].set(snapshot["text_rotation"])
+            state["text_warp"].set(snapshot["text_warp"])
+            state["text_var"].set(snapshot["text_value"])
+        finally:
+            state["is_restoring"] = False
+        self.refresh_editor_preview()
+
+    def undo_editor_change(self):
+        state = self.editor_state
+        if not state or not state["undo_stack"]:
+            return
+        snapshot = state["undo_stack"].pop()
+        self.restore_editor_snapshot(snapshot)
+
+    def finish_editor_action(self, _event=None):
+        state = self.editor_state
+        if not state:
+            return
+        state["paint_undo_active"] = False
+        state["text_drag_undo_active"] = False
+        state["control_undo_active"] = False
 
     def get_editor_font(self, size):
         size = max(8, int(size))
@@ -1208,21 +1302,27 @@ class MovieQuadEditor(tk.Tk):
         text_obj = state.get("selected_text") if state else None
         if not text_obj:
             return
-        state["text_var"].set(text_obj.get("text", ""))
-        state["text_color"]["value"] = text_obj.get("color", "#ffffff")
-        state["text_opacity"].set(text_obj.get("opacity", 100))
-        state["text_camouflage"].set(text_obj.get("camouflage", 0))
-        state["text_border_enabled"].set(text_obj.get("border_enabled", False))
-        state["text_size"].set(text_obj.get("size", 64))
-        state["text_thickness"].set(text_obj.get("thickness", 0))
-        state["text_rotation"].set(text_obj.get("rotation", 0))
-        state["text_warp"].set(text_obj.get("warp", 0))
+        state["is_restoring"] = True
+        try:
+            state["text_var"].set(text_obj.get("text", ""))
+            state["text_color"]["value"] = text_obj.get("color", "#ffffff")
+            state["text_opacity"].set(text_obj.get("opacity", 100))
+            state["text_camouflage"].set(text_obj.get("camouflage", 0))
+            state["text_border_enabled"].set(text_obj.get("border_enabled", False))
+            state["text_size"].set(text_obj.get("size", 64))
+            state["text_thickness"].set(text_obj.get("thickness", 0))
+            state["text_rotation"].set(text_obj.get("rotation", 0))
+            state["text_warp"].set(text_obj.get("warp", 0))
+        finally:
+            state["is_restoring"] = False
 
     def update_selected_text_from_controls(self, _value=None):
         state = self.editor_state
         text_obj = state.get("selected_text") if state else None
         if not text_obj:
             return
+        if not state["is_restoring"]:
+            self.push_editor_undo()
         text_obj["text"] = state["text_var"].get()
         text_obj["color"] = state["text_color"]["value"]
         text_obj["opacity"] = state["text_opacity"].get()
@@ -1232,6 +1332,13 @@ class MovieQuadEditor(tk.Tk):
         text_obj["thickness"] = state["text_thickness"].get()
         text_obj["rotation"] = state["text_rotation"].get()
         text_obj["warp"] = state["text_warp"].get()
+        self.refresh_editor_preview()
+
+    def on_editor_layer_control_changed(self, _value=None):
+        state = self.editor_state
+        if not state or state["is_restoring"]:
+            return
+        self.push_editor_undo()
         self.refresh_editor_preview()
 
     def draw_selected_text_box(self):
@@ -1300,6 +1407,7 @@ class MovieQuadEditor(tk.Tk):
             return
         color = colorchooser.askcolor(color=state["bg_color"]["value"], title="Background Color")
         if color and color[1]:
+            self.push_editor_undo()
             state["bg_color"]["value"] = color[1]
             self.refresh_editor_preview()
 
@@ -1314,6 +1422,7 @@ class MovieQuadEditor(tk.Tk):
         if not path:
             return
         try:
+            self.push_editor_undo()
             state["background_image"] = Image.open(path).convert("RGBA")
             self.refresh_editor_preview()
         except Exception:
@@ -1333,8 +1442,14 @@ class MovieQuadEditor(tk.Tk):
             return
         color = colorchooser.askcolor(color=state["text_color"]["value"], title="Text Color")
         if color and color[1]:
-            state["text_color"]["value"] = color[1]
-            self.update_selected_text_from_controls()
+            self.push_editor_undo()
+            state["is_restoring"] = True
+            try:
+                state["text_color"]["value"] = color[1]
+                self.update_selected_text_from_controls()
+            finally:
+                state["is_restoring"] = False
+            self.refresh_editor_preview()
 
     def rgba_from_hex(self, hex_color, opacity_percent):
         hex_color = hex_color.lstrip("#")
@@ -1352,6 +1467,7 @@ class MovieQuadEditor(tk.Tk):
                 state["selected_text"] = selected
                 self.sync_text_controls_from_selected()
             else:
+                self.push_editor_undo()
                 selected = {
                     "text": state["text_var"].get(),
                     "x": point[0],
@@ -1380,6 +1496,9 @@ class MovieQuadEditor(tk.Tk):
         if state["tool_var"].get() == "text":
             selected = state.get("selected_text")
             if selected:
+                if not state["text_drag_undo_active"]:
+                    self.push_editor_undo()
+                    state["text_drag_undo_active"] = True
                 selected["x"], selected["y"] = point
                 self.refresh_editor_preview()
             return
@@ -1387,6 +1506,9 @@ class MovieQuadEditor(tk.Tk):
 
     def paint_editor_point(self, point):
         state = self.editor_state
+        if not state["paint_undo_active"]:
+            self.push_editor_undo()
+            state["paint_undo_active"] = True
         draw = ImageDraw.Draw(state["draw_layer"])
         size = max(1, int(state["brush_size"].get()))
         color = self.rgba_from_hex(state["brush_color"]["value"], state["paint_opacity"].get())
@@ -1409,6 +1531,7 @@ class MovieQuadEditor(tk.Tk):
         state = self.editor_state
         if not state:
             return
+        self.push_editor_undo()
         state["draw_layer"] = Image.new("RGBA", state["original"].size, (0, 0, 0, 0))
         state["text_objects"] = []
         state["selected_text"] = None
@@ -1418,24 +1541,39 @@ class MovieQuadEditor(tk.Tk):
         state = self.editor_state
         if not state or not state.get("selected_text"):
             return
+        self.push_editor_undo()
         selected = state["selected_text"]
         state["text_objects"] = [text_obj for text_obj in state["text_objects"] if text_obj is not selected]
         state["selected_text"] = None
         self.refresh_editor_preview()
 
+    def close_import_editor(self):
+        if not self.editor_state:
+            return
+        answer = messagebox.askyesnocancel("Edit Imported Image", "Apply these changes to the selected video frame before closing?")
+        if answer is None:
+            return
+        if answer:
+            self.apply_editor_to_frame()
+            return
+        self.editor_state["window"].destroy()
+        self.editor_state = None
+
     def apply_editor_to_frame(self):
         if not self.state or not self.editor_state:
             return
+        output_frame = self.editor_state.get("editor_output_frame", self.state.current_output_frame)
         edit_dir = self.state.video_path.with_suffix("").parent / ".frame_edits"
         edit_dir.mkdir(exist_ok=True)
-        output = edit_dir / f"{self.state.video_path.stem}_frame_{self.state.current_output_frame}.png"
+        output = edit_dir / f"{self.state.video_path.stem}_frame_{output_frame}.png"
         self.compose_editor_image().convert("RGB").save(output)
-        self.state.edits[str(self.state.current_output_frame)] = str(output)
+        self.state.edits[str(output_frame)] = str(output)
         self.save_edits()
+        self.state.current_output_frame = output_frame
         self.show_current_frame()
         self.editor_state["window"].destroy()
         self.editor_state = None
-        self.status_var.set(f"Applied edited image to frame {self.state.current_output_frame}.")
+        self.status_var.set(f"Applied edited image to frame {output_frame}.")
 
     def clear_frame(self):
         if not self.state:
