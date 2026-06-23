@@ -22,6 +22,8 @@ The project has two versions:
 - Load a video.
 - Move through an output-frame timeline.
 - Replace one frame with an image.
+- Restore the last Android project when the app opens.
+- Add text to a selected frame with size, rotation, and X/Y placement controls.
 - Export a same-length MP4 with four frames for every original frame.
 - Keep the original audio when possible.
 - Add a second music track.
@@ -156,13 +158,17 @@ The local JDK and Gradle download folders are ignored by git. They are not part 
 3. Pick a video.
 4. Use the output-frame timeline to choose the exact frame.
 5. Tap `Replace Frame` to choose an image.
-6. Turn color blending on or off.
-7. Set `Color Blend Strength` and `Image Frequency Blend`.
-8. Tap `Add Music` if you want an extra track.
-9. Set `Original Soundtrack Volume` and `Added Music Volume`.
-10. Leave key matching enabled if you want the added music pitch-shifted to match the original audio.
-11. Tap `Save Folder` and choose where the MP4 should be written.
-12. Tap `Export To Chosen Folder`.
+6. Tap `Edit Text` to add text to the selected frame.
+7. Set text size, rotation, and X/Y placement, then apply it.
+8. Turn color blending on or off.
+9. Set `Color Blend Strength` and `Image Frequency Blend`.
+10. Tap `Add Music` if you want an extra track.
+11. Set `Original Soundtrack Volume` and `Added Music Volume`.
+12. Leave key matching enabled if you want the added music pitch-shifted to match the original audio.
+13. Tap `Save Folder` and choose where the MP4 should be written.
+14. Tap `Export To Chosen Folder`.
+
+The Android app saves the current project locally. When you open the app again it restores the last video, music track, save folder, swapped frames, edited text frames, and slider settings when Android still has access to those files.
 
 For SD cards, use the folder picker. If Android shows the SD card in that picker, the app can save there.
 

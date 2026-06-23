@@ -1,12 +1,16 @@
 package com.sslogic.videoframeswapper;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.ImageDecoder;
+import android.graphics.Paint;
 import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.os.Bundle;
@@ -45,11 +49,15 @@ import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 
+import org.json.JSONObject;
+
 public class MainActivity extends Activity {
     private static final int PICK_VIDEO = 10;
     private static final int PICK_MUSIC = 11;
     private static final int PICK_REPLACEMENT = 12;
     private static final int PICK_OUTPUT_TREE = 13;
+    private static final String PREFS = "video_frame_swapper_project";
+    private static final String PREF_PROJECT = "last_project";
     private static final int SLOT_COUNT = 4;
     private static final int ANALYSIS_SAMPLE_RATE = 22050;
     private static final int ANALYSIS_SECONDS = 90;
@@ -86,6 +94,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(buildUi());
+        restoreProject();
         refreshUi();
     }
 
@@ -126,12 +135,16 @@ public class MainActivity extends Activity {
         LinearLayout editRow = row();
         Button replace = button("Replace Frame");
         replace.setOnClickListener(v -> pick(PICK_REPLACEMENT, "image/*"));
+        Button editText = button("Edit Text");
+        editText.setOnClickListener(v -> openTextEditor());
         Button clear = button("Clear Frame");
         clear.setOnClickListener(v -> {
             replacements.remove(key(currentOutputFrame));
+            saveProject();
             refreshPreview();
         });
         editRow.addView(replace, weight());
+        editRow.addView(editText, weight());
         editRow.addView(clear, weight());
         root.addView(editRow);
 
@@ -285,6 +298,7 @@ public class MainActivity extends Activity {
         } else if (requestCode == PICK_OUTPUT_TREE) {
             outputTreeUri = uri;
         }
+        saveProject();
         refreshUi();
     }
 
@@ -373,9 +387,188 @@ public class MainActivity extends Activity {
     }
 
     private Bitmap loadBitmap(Uri uri, int width, int height) throws IOException {
+        if ("file".equals(uri.getScheme())) {
+            Bitmap bitmap = BitmapFactory.decodeFile(uri.getPath());
+            if (bitmap == null) {
+                throw new IOException("Could not read image file.");
+            }
+            return Bitmap.createScaledBitmap(bitmap, width, height, true);
+        }
         ImageDecoder.Source source = ImageDecoder.createSource(getContentResolver(), uri);
         Bitmap bitmap = ImageDecoder.decodeBitmap(source, (decoder, info, src) -> decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE));
         return Bitmap.createScaledBitmap(bitmap, width, height, true);
+    }
+
+    private void saveProject() {
+        try {
+            JSONObject root = new JSONObject();
+            if (videoUri != null) {
+                root.put("videoUri", videoUri.toString());
+            }
+            if (musicUri != null) {
+                root.put("musicUri", musicUri.toString());
+            }
+            if (outputTreeUri != null) {
+                root.put("outputTreeUri", outputTreeUri.toString());
+            }
+            root.put("currentOutputFrame", currentOutputFrame);
+            root.put("sourceVolume", sourceVolumeSeek.getProgress());
+            root.put("musicVolume", musicVolumeSeek.getProgress());
+            root.put("keyMatch", keyMatchCheck.isChecked());
+            root.put("colorBlend", colorBlendCheck.isChecked());
+            root.put("colorBlendStrength", colorBlendSeek.getProgress());
+            root.put("frequencyBlendStrength", frequencyBlendSeek.getProgress());
+            JSONObject edits = new JSONObject();
+            for (Map.Entry<String, Uri> entry : replacements.entrySet()) {
+                edits.put(entry.getKey(), entry.getValue().toString());
+            }
+            root.put("replacements", edits);
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_PROJECT, root.toString()).apply();
+        } catch (Exception exc) {
+            setStatus("Project save failed: " + exc.getMessage());
+        }
+    }
+
+    private void restoreProject() {
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        String raw = prefs.getString(PREF_PROJECT, null);
+        if (raw == null) {
+            return;
+        }
+        try {
+            JSONObject root = new JSONObject(raw);
+            if (root.has("videoUri")) {
+                videoUri = Uri.parse(root.getString("videoUri"));
+                loadVideoMetadata();
+            }
+            if (root.has("musicUri")) {
+                musicUri = Uri.parse(root.getString("musicUri"));
+            }
+            if (root.has("outputTreeUri")) {
+                outputTreeUri = Uri.parse(root.getString("outputTreeUri"));
+            }
+            currentOutputFrame = Math.max(0, Math.min(outputFrameCount() - 1, root.optInt("currentOutputFrame", 0)));
+            sourceVolumeSeek.setProgress(root.optInt("sourceVolume", 100));
+            musicVolumeSeek.setProgress(root.optInt("musicVolume", 50));
+            keyMatchCheck.setChecked(root.optBoolean("keyMatch", true));
+            colorBlendCheck.setChecked(root.optBoolean("colorBlend", true));
+            colorBlendSeek.setProgress(root.optInt("colorBlendStrength", 65));
+            frequencyBlendSeek.setProgress(root.optInt("frequencyBlendStrength", 35));
+            replacements.clear();
+            JSONObject edits = root.optJSONObject("replacements");
+            if (edits != null) {
+                java.util.Iterator<String> keys = edits.keys();
+                while (keys.hasNext()) {
+                    String key = keys.next();
+                    replacements.put(key, Uri.parse(edits.getString(key)));
+                }
+            }
+            setStatus("Restored last project.");
+        } catch (Exception exc) {
+            setStatus("Project restore failed: " + exc.getMessage());
+        }
+    }
+
+    private void openTextEditor() {
+        if (videoUri == null) {
+            setStatus("Open a video first.");
+            return;
+        }
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(28, 16, 28, 0);
+
+        EditText textInput = new EditText(this);
+        textInput.setHint("Text");
+        textInput.setText("Text");
+        layout.addView(textInput, matchWrap());
+
+        TextView sizeLabel = label("Text Size");
+        layout.addView(sizeLabel);
+        SeekBar sizeSeek = new SeekBar(this);
+        sizeSeek.setMax(300);
+        sizeSeek.setProgress(64);
+        layout.addView(sizeSeek, matchWrap());
+
+        TextView rotateLabel = label("Rotation");
+        layout.addView(rotateLabel);
+        SeekBar rotationSeek = new SeekBar(this);
+        rotationSeek.setMax(360);
+        rotationSeek.setProgress(0);
+        layout.addView(rotationSeek, matchWrap());
+
+        TextView xLabel = label("X Position");
+        layout.addView(xLabel);
+        SeekBar xSeek = new SeekBar(this);
+        xSeek.setMax(1000);
+        xSeek.setProgress(500);
+        layout.addView(xSeek, matchWrap());
+
+        TextView yLabel = label("Y Position");
+        layout.addView(yLabel);
+        SeekBar ySeek = new SeekBar(this);
+        ySeek.setMax(1000);
+        ySeek.setProgress(500);
+        layout.addView(ySeek, matchWrap());
+
+        new AlertDialog.Builder(this)
+                .setTitle("Add Text To Frame")
+                .setView(layout)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Apply", (dialog, which) -> {
+                    try {
+                        applyTextToCurrentFrame(
+                                textInput.getText().toString(),
+                                Math.max(8, sizeSeek.getProgress()),
+                                rotationSeek.getProgress(),
+                                xSeek.getProgress() / 1000.0f,
+                                ySeek.getProgress() / 1000.0f);
+                    } catch (Exception exc) {
+                        setStatus("Text edit failed: " + exc.getMessage());
+                    }
+                })
+                .show();
+    }
+
+    private void applyTextToCurrentFrame(String text, int size, int rotation, float xRatio, float yRatio) throws Exception {
+        MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+        Bitmap base;
+        try {
+            retriever.setDataSource(this, videoUri);
+            int sourceFrame = sourceFrameForOutput(currentOutputFrame);
+            Uri replacement = replacements.get(key(currentOutputFrame));
+            if (replacement != null) {
+                base = loadBitmap(replacement, videoWidth, videoHeight);
+            } else {
+                base = frameAt(retriever, sourceFrame);
+            }
+        } finally {
+            safeRelease(retriever);
+        }
+        Bitmap edited = base.copy(Bitmap.Config.ARGB_8888, true);
+        Canvas canvas = new Canvas(edited);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        paint.setColor(Color.WHITE);
+        paint.setTextSize(size);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setShadowLayer(4f, 2f, 2f, Color.argb(160, 0, 0, 0));
+        float x = xRatio * edited.getWidth();
+        float y = yRatio * edited.getHeight();
+        canvas.save();
+        canvas.rotate(rotation, x, y);
+        canvas.drawText(text, x, y, paint);
+        canvas.restore();
+
+        File editedDir = new File(getFilesDir(), "edited_frames");
+        if (!editedDir.exists() && !editedDir.mkdirs()) {
+            throw new IOException("Could not create edited frame folder.");
+        }
+        File output = new File(editedDir, "frame_" + currentOutputFrame + ".png");
+        writePng(edited, output);
+        replacements.put(key(currentOutputFrame), Uri.fromFile(output));
+        saveProject();
+        refreshUi();
+        setStatus("Applied text to frame " + currentOutputFrame + ".");
     }
 
     private int outputFrameCount() {

@@ -23,3 +23,7 @@ Install on Android:
 5. Open the app.
 
 The app lets you choose the export folder with Android's folder picker. If your phone shows the SD card in that picker, choose the SD card folder and the export will save there.
+
+The app restores the last project when it opens again. It keeps the selected video, music, save folder, swapped frames, edited text-frame files, and slider settings as long as Android still allows access to those files.
+
+Use `Edit Text` to add text to the selected frame. The text tool has size, rotation, and X/Y placement controls.
