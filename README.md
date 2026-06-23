@@ -12,10 +12,10 @@ export:  4,000 frames at 120 FPS
 length:  about the same
 ```
 
-The project has two versions:
+The project has two parts:
 
 - Windows desktop editor in Python
-- Android app in `android/`
+- Android app in the `android-fork` branch
 
 ## Features
 
@@ -78,76 +78,54 @@ Nothing is installed globally.
 
 The editor saves a `.quad_edits.json` file next to the video. That file stores the replacement slots and audio settings for that video.
 
-## Android Install From Source
+## Android APK Download
 
-Requirements:
-
-- Android Studio
-- Android SDK
-- JDK 17
-
-On this machine, the SDK was found at:
+The Android app is on its own branch:
 
 ```text
-E:\androidsdk
+https://github.com/sslogic/video-frame-swapper/tree/android-fork
 ```
 
-Open the Android project:
-
-1. Start Android Studio.
-2. Choose `Open`.
-3. Open this folder:
+Download the compiled APK here:
 
 ```text
-video-frame-swapper\android
+https://github.com/sslogic/video-frame-swapper/raw/android-fork/releases/video-frame-swapper-debug.apk
 ```
 
-4. Let Gradle sync.
-5. If Android Studio asks for an SDK location, use your Android SDK folder.
-6. Build with `Build > Build Bundle(s) / APK(s) > Build APK(s)`.
+## Android Install
 
-The debug APK will be created at:
+1. Download the APK on the phone.
+2. Open the downloaded file.
+3. If Android blocks it, allow installs from that browser or file manager.
+4. Install `Video Frame Swapper`.
+5. Open the app.
 
-```text
-android\app\build\outputs\apk\debug\app-debug.apk
-```
-
-## Android Command-Line Build
-
-If you already have Java and Gradle installed:
-
-```powershell
-cd android
-gradle :app:assembleDebug
-```
-
-If you are building on the original development machine from this folder, this command works:
-
-```powershell
-cd "E:\movie cutter\android"
-$env:JAVA_HOME = "E:\movie cutter\android\jdk17b\jdk-17.0.19+10"
-$env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
-.\gradle-8.10.2\bin\gradle.bat :app:assembleDebug
-```
-
-The local JDK and Gradle download folders are ignored by git. They are not part of the repository.
+For SD cards, use the folder picker. If Android shows the SD card in that picker, the app can save there.
 
 ## Android Use
 
-1. Install the APK on the phone.
-2. Tap `Open Video`.
-3. Pick a video.
-4. Tap one of the four preview slots.
-5. Tap `Replace Selected Slot` to choose an image.
-6. Turn color blending on or off.
-7. Set `Color Blend Strength` and `Image Frequency Blend`.
-8. Tap `Add Music` if you want an extra track.
-9. Set `Original Soundtrack Volume` and `Added Music Volume`.
-10. Leave key matching enabled if you want the added music pitch-shifted to match the original audio.
-11. Tap `Save Folder` and choose where the MP4 should be written.
-12. Tap `Export To Chosen Folder`.
+1. Tap `Open Video`.
+2. Pick a video.
+3. Tap one of the four preview slots.
+4. Tap `Replace Selected Slot` to choose an image.
+5. Turn color blending on or off.
+6. Set `Color Blend Strength` and `Image Frequency Blend`.
+7. Tap `Add Music` if you want an extra track.
+8. Set `Original Soundtrack Volume` and `Added Music Volume`.
+9. Leave key matching enabled if you want the added music pitch-shifted to match the original audio.
+10. Tap `Save Folder` and choose where the MP4 should be written.
+11. Tap `Export To Chosen Folder`.
 
-For SD cards, use the folder picker. If Android shows the SD card in that picker, the app can save there.
+## Android Source Build
+
+If you want to build the Android app yourself, switch to the Android branch:
+
+```powershell
+git fetch origin
+git checkout android-fork
+```
+
+Open the `android` folder in Android Studio and build the APK from there.
 
 ## Notes
 
