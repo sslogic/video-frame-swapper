@@ -25,9 +25,11 @@ The project has two versions:
 - Export a same-length MP4 with four frames for every original frame.
 - Keep the original audio when possible.
 - Add a second music track.
-- Adjust the added music volume.
+- Raise or lower the original soundtrack volume.
+- Raise or lower the added music volume.
 - Detect the key of the original audio and added music, then pitch-shift the added music to match.
 - Color-match replacement images using the previous and next video frames.
+- Blend image detail/frequency from nearby frames so replacements sit better in motion.
 - Android output uses the system folder picker, so you can save to SD card folders when the phone exposes them.
 
 ## Get The Code
@@ -66,10 +68,13 @@ Nothing is installed globally.
 3. Pick `Slot 1`, `Slot 2`, `Slot 3`, or `Slot 4`.
 4. Click `Replace Slot` to put an image into that slot.
 5. Use `Color blend replacement images` if you want the replacement image matched to nearby frames.
-6. Click `Add Music` if you want a second track.
-7. Use `Music Volume` to set the added track volume.
-8. Click `Tone Match + Half Volume` to set the added track to 50% and pitch-match it to the original audio.
-9. Click `Export Video`.
+6. Use `Color Blend Strength` for more or less color matching.
+7. Use `Image Frequency Blend` for more or less detail/texture matching from nearby frames.
+8. Click `Add Music` if you want a second track.
+9. Use `Original Soundtrack Volume` to raise or lower the video audio.
+10. Use `Added Music Volume` to raise or lower the added track.
+11. Click `Tone Match + Half Volume` to set the added track to 50% and pitch-match it to the original audio.
+12. Click `Export Video`.
 
 The editor saves a `.quad_edits.json` file next to the video. That file stores the replacement slots and audio settings for that video.
 
@@ -135,10 +140,12 @@ The local JDK and Gradle download folders are ignored by git. They are not part 
 4. Tap one of the four preview slots.
 5. Tap `Replace Selected Slot` to choose an image.
 6. Turn color blending on or off.
-7. Tap `Add Music` if you want an extra track.
-8. Leave key matching enabled if you want the added music pitch-shifted to match the original audio.
-9. Tap `Save Folder` and choose where the MP4 should be written.
-10. Tap `Export To Chosen Folder`.
+7. Set `Color Blend Strength` and `Image Frequency Blend`.
+8. Tap `Add Music` if you want an extra track.
+9. Set `Original Soundtrack Volume` and `Added Music Volume`.
+10. Leave key matching enabled if you want the added music pitch-shifted to match the original audio.
+11. Tap `Save Folder` and choose where the MP4 should be written.
+12. Tap `Export To Chosen Folder`.
 
 For SD cards, use the folder picker. If Android shows the SD card in that picker, the app can save there.
 

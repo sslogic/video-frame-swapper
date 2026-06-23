@@ -121,7 +121,7 @@ def analyze_audio_key(ffmpeg, media_path):
     return {"pc": best_pc, "mode": best_mode, "score": best_score, "confidence": confidence}
 
 
-def blend_replacement_frame(replacement, previous_frame, next_frame, strength):
+def blend_replacement_frame(replacement, previous_frame, next_frame, color_strength, frequency_strength):
     context = []
     for frame in (previous_frame, next_frame):
         if frame is not None:
@@ -141,9 +141,19 @@ def blend_replacement_frame(replacement, previous_frame, next_frame, strength):
 
     matched = (replacement_float - repl_mean) * (ctx_std / repl_std) + ctx_mean
     matched = np.clip(matched, 0, 255)
-    blended = replacement_float * (1.0 - strength) + matched * strength
-    edge_mix = min(0.35, strength * 0.5)
+    blended = replacement_float * (1.0 - color_strength) + matched * color_strength
+    edge_mix = min(0.35, color_strength * 0.5)
     blended = blended * (1.0 - edge_mix) + context_frame * edge_mix
+
+    if frequency_strength > 0:
+        blur_size = (0, 0)
+        replacement_low = cv2.GaussianBlur(replacement_float, blur_size, 3.0)
+        context_low = cv2.GaussianBlur(context_frame, blur_size, 3.0)
+        replacement_detail = replacement_float - replacement_low
+        context_detail = context_frame - context_low
+        detail = replacement_detail * (1.0 - frequency_strength) + context_detail * frequency_strength
+        low = cv2.GaussianBlur(blended, blur_size, 1.8)
+        blended = low + detail
     return np.clip(blended, 0, 255).astype(np.uint8)
 
 
@@ -158,11 +168,13 @@ class VideoState:
     current_frame: int = 0
     current_slot: int = 0
     edits: dict = field(default_factory=dict)
+    source_volume: float = 1.0
     music_path: str = ""
     music_volume: float = 0.5
     music_tone_match: bool = False
     frame_color_blend: bool = True
     frame_color_blend_strength: float = 0.65
+    frame_frequency_blend_strength: float = 0.35
 
     @property
     def duration(self):
@@ -195,10 +207,12 @@ class MovieQuadEditor(tk.Tk):
         self.video_controls = []
         self.contact_bounds = None
         self.music_volume_var = tk.DoubleVar(value=50.0)
+        self.source_volume_var = tk.DoubleVar(value=100.0)
         self.music_label_var = tk.StringVar(value="No music track")
         self.music_tone_var = tk.BooleanVar(value=False)
         self.color_blend_var = tk.BooleanVar(value=True)
         self.color_blend_strength_var = tk.DoubleVar(value=65.0)
+        self.frequency_blend_strength_var = tk.DoubleVar(value=35.0)
 
         self._build_ui()
         self._set_controls_enabled(False)
@@ -296,12 +310,22 @@ class MovieQuadEditor(tk.Tk):
             command=self.on_color_blend_changed,
         )
         self.color_blend_slider.grid(row=8, column=0, sticky="ew", pady=(2, 10))
+        ttk.Label(controls, text="Image Frequency Blend").grid(row=9, column=0, sticky="w")
+        self.frequency_blend_slider = ttk.Scale(
+            controls,
+            from_=0,
+            to=100,
+            orient=tk.HORIZONTAL,
+            variable=self.frequency_blend_strength_var,
+            command=self.on_color_blend_changed,
+        )
+        self.frequency_blend_slider.grid(row=10, column=0, sticky="ew", pady=(2, 10))
 
-        ttk.Separator(controls).grid(row=9, column=0, sticky="ew", pady=8)
+        ttk.Separator(controls).grid(row=11, column=0, sticky="ew", pady=8)
 
-        ttk.Label(controls, text="Extra Music Track").grid(row=10, column=0, sticky="w")
+        ttk.Label(controls, text="Extra Music Track").grid(row=12, column=0, sticky="w")
         music_row = ttk.Frame(controls)
-        music_row.grid(row=11, column=0, sticky="ew", pady=(4, 6))
+        music_row.grid(row=13, column=0, sticky="ew", pady=(4, 6))
         music_row.columnconfigure(0, weight=1)
         music_row.columnconfigure(1, weight=1)
         self.add_music_button = ttk.Button(music_row, text="Add Music", command=self.add_music_track)
@@ -309,35 +333,45 @@ class MovieQuadEditor(tk.Tk):
         self.clear_music_button = ttk.Button(music_row, text="Clear Music", command=self.clear_music_track)
         self.clear_music_button.grid(row=0, column=1, sticky="ew")
 
-        ttk.Label(controls, textvariable=self.music_label_var, wraplength=360).grid(row=12, column=0, sticky="ew")
-        ttk.Label(controls, text="Music Volume").grid(row=13, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(controls, textvariable=self.music_label_var, wraplength=360).grid(row=14, column=0, sticky="ew")
+        ttk.Label(controls, text="Original Soundtrack Volume").grid(row=15, column=0, sticky="w", pady=(8, 0))
+        self.source_volume_slider = ttk.Scale(
+            controls,
+            from_=0,
+            to=200,
+            orient=tk.HORIZONTAL,
+            variable=self.source_volume_var,
+            command=self.on_source_volume_changed,
+        )
+        self.source_volume_slider.grid(row=16, column=0, sticky="ew", pady=(2, 6))
+        ttk.Label(controls, text="Added Music Volume").grid(row=17, column=0, sticky="w", pady=(8, 0))
         self.music_volume_slider = ttk.Scale(
             controls,
             from_=0,
-            to=100,
+            to=200,
             orient=tk.HORIZONTAL,
             variable=self.music_volume_var,
             command=self.on_music_volume_changed,
         )
-        self.music_volume_slider.grid(row=14, column=0, sticky="ew", pady=(2, 6))
+        self.music_volume_slider.grid(row=18, column=0, sticky="ew", pady=(2, 6))
         self.tone_match_button = ttk.Button(
             controls,
             text="Tone Match + Half Volume",
             command=self.apply_tone_match_preset,
         )
-        self.tone_match_button.grid(row=15, column=0, sticky="ew", pady=(0, 10))
+        self.tone_match_button.grid(row=19, column=0, sticky="ew", pady=(0, 10))
 
         self.status_var = tk.StringVar(value="")
         self.status_label = ttk.Label(controls, textvariable=self.status_var, wraplength=360, justify=tk.LEFT)
-        self.status_label.grid(row=16, column=0, sticky="ew", pady=(0, 12))
+        self.status_label.grid(row=20, column=0, sticky="ew", pady=(0, 12))
 
-        ttk.Separator(controls).grid(row=17, column=0, sticky="ew", pady=8)
+        ttk.Separator(controls).grid(row=21, column=0, sticky="ew", pady=8)
 
         self.info_var = tk.StringVar(value="")
-        ttk.Label(controls, textvariable=self.info_var, justify=tk.LEFT, wraplength=360).grid(row=18, column=0, sticky="ew")
+        ttk.Label(controls, textvariable=self.info_var, justify=tk.LEFT, wraplength=360).grid(row=22, column=0, sticky="ew")
 
         self.progress = ttk.Progressbar(controls, mode="determinate")
-        self.progress.grid(row=19, column=0, sticky="ew", pady=(16, 4))
+        self.progress.grid(row=23, column=0, sticky="ew", pady=(16, 4))
 
         self.video_controls = [
             self.save_button,
@@ -350,8 +384,10 @@ class MovieQuadEditor(tk.Tk):
             self.clear_button,
             self.color_blend_check,
             self.color_blend_slider,
+            self.frequency_blend_slider,
             self.add_music_button,
             self.clear_music_button,
+            self.source_volume_slider,
             self.music_volume_slider,
             self.tone_match_button,
             *self.slot_buttons,
@@ -413,11 +449,13 @@ class MovieQuadEditor(tk.Tk):
             data = json.loads(self.state.edit_path.read_text(encoding="utf-8"))
             if data.get("video") == str(self.state.video_path):
                 self.state.edits = data.get("edits", {})
+                self.state.source_volume = float(data.get("source_volume", 1.0))
                 self.state.music_path = data.get("music_path", "")
                 self.state.music_volume = float(data.get("music_volume", 0.5))
                 self.state.music_tone_match = bool(data.get("music_tone_match", False))
                 self.state.frame_color_blend = bool(data.get("frame_color_blend", True))
                 self.state.frame_color_blend_strength = float(data.get("frame_color_blend_strength", 0.65))
+                self.state.frame_frequency_blend_strength = float(data.get("frame_frequency_blend_strength", 0.35))
                 self.sync_color_blend_controls()
                 self.sync_music_controls()
                 self.status_var.set(f"Loaded {len(self.state.edits)} saved slot edits.")
@@ -434,11 +472,13 @@ class MovieQuadEditor(tk.Tk):
             "height": self.state.height,
             "slot_count": SLOT_COUNT,
             "edits": self.state.edits,
+            "source_volume": self.state.source_volume,
             "music_path": self.state.music_path,
             "music_volume": self.state.music_volume,
             "music_tone_match": self.state.music_tone_match,
             "frame_color_blend": self.state.frame_color_blend,
             "frame_color_blend_strength": self.state.frame_color_blend_strength,
+            "frame_frequency_blend_strength": self.state.frame_frequency_blend_strength,
         }
         self.state.edit_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         self.status_var.set(f"Saved edits to {self.state.edit_path.name}.")
@@ -447,8 +487,10 @@ class MovieQuadEditor(tk.Tk):
         if not self.state:
             self.music_label_var.set("No music track")
             self.music_volume_var.set(50.0)
+            self.source_volume_var.set(100.0)
             self.music_tone_var.set(False)
             return
+        self.source_volume_var.set(round(self.state.source_volume * 100, 1))
         self.music_volume_var.set(round(self.state.music_volume * 100, 1))
         self.music_tone_var.set(self.state.music_tone_match)
         if self.state.music_path:
@@ -465,6 +507,7 @@ class MovieQuadEditor(tk.Tk):
             return
         self.color_blend_var.set(self.state.frame_color_blend)
         self.color_blend_strength_var.set(round(self.state.frame_color_blend_strength * 100, 1))
+        self.frequency_blend_strength_var.set(round(self.state.frame_frequency_blend_strength * 100, 1))
 
     def read_frame(self, frame_index):
         self.capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
@@ -499,6 +542,7 @@ class MovieQuadEditor(tk.Tk):
             previous_frame,
             next_frame,
             self.state.frame_color_blend_strength,
+            self.state.frame_frequency_blend_strength,
         )
 
     def show_current_frame(self):
@@ -686,7 +730,13 @@ class MovieQuadEditor(tk.Tk):
     def on_music_volume_changed(self, _value=None):
         if not self.state:
             return
-        self.state.music_volume = clamp(self.music_volume_var.get() / 100.0, 0.0, 1.0)
+        self.state.music_volume = clamp(self.music_volume_var.get() / 100.0, 0.0, 2.0)
+        self.sync_music_controls()
+
+    def on_source_volume_changed(self, _value=None):
+        if not self.state:
+            return
+        self.state.source_volume = clamp(self.source_volume_var.get() / 100.0, 0.0, 2.0)
         self.sync_music_controls()
 
     def on_color_blend_changed(self, _value=None):
@@ -694,6 +744,7 @@ class MovieQuadEditor(tk.Tk):
             return
         self.state.frame_color_blend = bool(self.color_blend_var.get())
         self.state.frame_color_blend_strength = clamp(self.color_blend_strength_var.get() / 100.0, 0.0, 1.0)
+        self.state.frame_frequency_blend_strength = clamp(self.frequency_blend_strength_var.get() / 100.0, 0.0, 1.0)
         self.show_current_frame()
 
     def apply_tone_match_preset(self):
@@ -772,6 +823,30 @@ class MovieQuadEditor(tk.Tk):
         music_path = Path(self.state.music_path) if self.state.music_path else None
         has_music = music_path and music_path.exists()
         if not has_music:
+            has_source_audio = self.source_has_audio(ffmpeg, self.state.video_path)
+            if has_source_audio and abs(self.state.source_volume - 1.0) > 0.001:
+                return [
+                    ffmpeg,
+                    "-y",
+                    "-i",
+                    str(silent_path),
+                    "-i",
+                    str(self.state.video_path),
+                    "-filter_complex",
+                    f"[1:a:0]volume={self.state.source_volume:.3f},alimiter=limit=0.95[aout]",
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "[aout]",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-shortest",
+                    str(output_path),
+                ]
             return [
                 ffmpeg,
                 "-y",
@@ -824,7 +899,7 @@ class MovieQuadEditor(tk.Tk):
                 "-i",
                 str(music_path),
                 "-filter_complex",
-                f"[1:a:0]volume=1.0[maina];[2:a:0]{music_filter}[musica];"
+                f"[1:a:0]volume={self.state.source_volume:.3f}[maina];[2:a:0]{music_filter}[musica];"
                 "[maina][musica]amix=inputs=2:duration=first:dropout_transition=0,alimiter=limit=0.95[aout]",
                 "-map",
                 "0:v:0",

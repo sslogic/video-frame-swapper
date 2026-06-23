@@ -70,8 +70,10 @@ public class MainActivity extends Activity {
     private EditText outputName;
     private CheckBox keyMatchCheck;
     private CheckBox colorBlendCheck;
+    private SeekBar sourceVolumeSeek;
     private SeekBar musicVolumeSeek;
     private SeekBar colorBlendSeek;
+    private SeekBar frequencyBlendSeek;
     private int currentFrame = 0;
     private int selectedSlot = 0;
     private int frameCount = 1;
@@ -173,10 +175,17 @@ public class MainActivity extends Activity {
         });
         root.addView(frameSeek, matchWrap());
 
-        TextView musicLabel = label("Music Volume");
+        TextView sourceVolumeLabel = label("Original Soundtrack Volume");
+        root.addView(sourceVolumeLabel);
+        sourceVolumeSeek = new SeekBar(this);
+        sourceVolumeSeek.setMax(200);
+        sourceVolumeSeek.setProgress(100);
+        root.addView(sourceVolumeSeek, matchWrap());
+
+        TextView musicLabel = label("Added Music Volume");
         root.addView(musicLabel);
         musicVolumeSeek = new SeekBar(this);
-        musicVolumeSeek.setMax(100);
+        musicVolumeSeek.setMax(200);
         musicVolumeSeek.setProgress(50);
         root.addView(musicVolumeSeek, matchWrap());
 
@@ -196,6 +205,13 @@ public class MainActivity extends Activity {
         colorBlendSeek.setMax(100);
         colorBlendSeek.setProgress(65);
         root.addView(colorBlendSeek, matchWrap());
+
+        TextView frequencyLabel = label("Image Frequency Blend");
+        root.addView(frequencyLabel);
+        frequencyBlendSeek = new SeekBar(this);
+        frequencyBlendSeek.setMax(100);
+        frequencyBlendSeek.setProgress(35);
+        root.addView(frequencyBlendSeek, matchWrap());
 
         outputName = new EditText(this);
         outputName.setHint("output_quad.mp4");
@@ -349,7 +365,12 @@ public class MainActivity extends Activity {
                 if (replacement != null) {
                     preview = loadBitmap(replacement, videoWidth, videoHeight);
                     if (colorBlendCheck != null && colorBlendCheck.isChecked()) {
-                        preview = colorBlend(preview, previous, next, colorBlendSeek.getProgress() / 100.0);
+                        preview = colorBlend(
+                                preview,
+                                previous,
+                                next,
+                                colorBlendSeek.getProgress() / 100.0,
+                                frequencyBlendSeek.getProgress() / 100.0);
                     }
                 }
                 slotViews[i].setImageBitmap(preview);
@@ -438,7 +459,12 @@ public class MainActivity extends Activity {
                     if (replacement != null) {
                         out = loadBitmap(replacement, videoWidth, videoHeight);
                         if (colorBlendCheck.isChecked()) {
-                            out = colorBlend(out, previous, next, colorBlendSeek.getProgress() / 100.0);
+                            out = colorBlend(
+                                    out,
+                                    previous,
+                                    next,
+                                    colorBlendSeek.getProgress() / 100.0,
+                                    frequencyBlendSeek.getProgress() / 100.0);
                         }
                     }
                     File frameFile = new File(framesDir, String.format(Locale.US, "frame_%08d.png", outputIndex++));
@@ -471,12 +497,21 @@ public class MainActivity extends Activity {
                 + " -i " + q(framePattern);
 
         if (musicFile == null) {
+            double sourceVolume = sourceVolumeSeek.getProgress() / 100.0;
+            if (sourceHasAudio(sourceFile) && Math.abs(sourceVolume - 1.0) > 0.001) {
+                return video + " -i " + q(sourceFile.getAbsolutePath())
+                        + " -filter_complex " + q("[1:a:0]volume=" + String.format(Locale.US, "%.3f", sourceVolume)
+                        + ",alimiter=limit=0.95[aout]")
+                        + " -map 0:v:0 -map [aout] -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest "
+                        + q(outputFile.getAbsolutePath());
+            }
             return video + " -i " + q(sourceFile.getAbsolutePath())
                     + " -map 0:v:0 -map 1:a? -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest "
                     + q(outputFile.getAbsolutePath());
         }
 
         boolean hasAudio = sourceHasAudio(sourceFile);
+        double sourceVolume = sourceVolumeSeek.getProgress() / 100.0;
         double volume = musicVolumeSeek.getProgress() / 100.0;
         int semitoneShift = 0;
         String statusText = "Music mix: " + Math.round(volume * 100) + "%";
@@ -495,7 +530,8 @@ public class MainActivity extends Activity {
 
         if (hasAudio) {
             return video + " -i " + q(sourceFile.getAbsolutePath()) + " -stream_loop -1 -i " + q(musicFile.getAbsolutePath())
-                    + " -filter_complex " + q("[1:a:0]volume=1.0[maina];[2:a:0]" + musicFilter
+                    + " -filter_complex " + q("[1:a:0]volume=" + String.format(Locale.US, "%.3f", sourceVolume)
+                    + "[maina];[2:a:0]" + musicFilter
                     + "[musica];[maina][musica]amix=inputs=2:duration=first:dropout_transition=0,alimiter=limit=0.95[aout]")
                     + " -map 0:v:0 -map [aout] -c:v libx264 -pix_fmt yuv420p -c:a aac -t "
                     + q(duration) + " " + q(outputFile.getAbsolutePath());
@@ -643,7 +679,7 @@ public class MainActivity extends Activity {
         return shift;
     }
 
-    private Bitmap colorBlend(Bitmap replacement, Bitmap previous, Bitmap next, double strength) {
+    private Bitmap colorBlend(Bitmap replacement, Bitmap previous, Bitmap next, double colorStrength, double frequencyStrength) {
         Bitmap repl = replacement.copy(Bitmap.Config.ARGB_8888, true);
         Bitmap prev = Bitmap.createScaledBitmap(previous, repl.getWidth(), repl.getHeight(), true);
         Bitmap nxt = Bitmap.createScaledBitmap(next, repl.getWidth(), repl.getHeight(), true);
@@ -660,7 +696,7 @@ public class MainActivity extends Activity {
         double[] rs = std(rp, rm);
         double[] cm = contextMean(pp, np);
         double[] cs = contextStd(pp, np, cm);
-        double edgeMix = Math.min(0.35, strength * 0.5);
+        double edgeMix = Math.min(0.35, colorStrength * 0.5);
         for (int i = 0; i < rp.length; i++) {
             int r = Color.red(rp[i]);
             int g = Color.green(rp[i]);
@@ -668,13 +704,67 @@ public class MainActivity extends Activity {
             int cr = (Color.red(pp[i]) + Color.red(np[i])) / 2;
             int cg = (Color.green(pp[i]) + Color.green(np[i])) / 2;
             int cb = (Color.blue(pp[i]) + Color.blue(np[i])) / 2;
-            int nr = channelBlend(r, cr, rm[0], rs[0], cm[0], cs[0], strength, edgeMix);
-            int ng = channelBlend(g, cg, rm[1], rs[1], cm[1], cs[1], strength, edgeMix);
-            int nb = channelBlend(b, cb, rm[2], rs[2], cm[2], cs[2], strength, edgeMix);
+            int nr = channelBlend(r, cr, rm[0], rs[0], cm[0], cs[0], colorStrength, edgeMix);
+            int ng = channelBlend(g, cg, rm[1], rs[1], cm[1], cs[1], colorStrength, edgeMix);
+            int nb = channelBlend(b, cb, rm[2], rs[2], cm[2], cs[2], colorStrength, edgeMix);
             rp[i] = Color.argb(Color.alpha(rp[i]), nr, ng, nb);
+        }
+        if (frequencyStrength > 0.0) {
+            applyFrequencyBlend(rp, pp, np, width, height, frequencyStrength);
         }
         repl.setPixels(rp, 0, width, 0, 0, width, height);
         return repl;
+    }
+
+    private void applyFrequencyBlend(int[] replacement, int[] previous, int[] next, int width, int height, double strength) {
+        int[] original = replacement.clone();
+        for (int y = 1; y < height - 1; y++) {
+            for (int x = 1; x < width - 1; x++) {
+                int index = y * width + x;
+                int replLowR = neighborhoodAverage(original, width, x, y, 0);
+                int replLowG = neighborhoodAverage(original, width, x, y, 1);
+                int replLowB = neighborhoodAverage(original, width, x, y, 2);
+                int ctxLowR = (neighborhoodAverage(previous, width, x, y, 0) + neighborhoodAverage(next, width, x, y, 0)) / 2;
+                int ctxLowG = (neighborhoodAverage(previous, width, x, y, 1) + neighborhoodAverage(next, width, x, y, 1)) / 2;
+                int ctxLowB = (neighborhoodAverage(previous, width, x, y, 2) + neighborhoodAverage(next, width, x, y, 2)) / 2;
+
+                int replDetailR = Color.red(original[index]) - replLowR;
+                int replDetailG = Color.green(original[index]) - replLowG;
+                int replDetailB = Color.blue(original[index]) - replLowB;
+                int ctxR = (Color.red(previous[index]) + Color.red(next[index])) / 2;
+                int ctxG = (Color.green(previous[index]) + Color.green(next[index])) / 2;
+                int ctxB = (Color.blue(previous[index]) + Color.blue(next[index])) / 2;
+                int ctxDetailR = ctxR - ctxLowR;
+                int ctxDetailG = ctxG - ctxLowG;
+                int ctxDetailB = ctxB - ctxLowB;
+
+                int r = clampChannel(Color.red(replacement[index]) + (int) Math.round((ctxDetailR - replDetailR) * strength));
+                int g = clampChannel(Color.green(replacement[index]) + (int) Math.round((ctxDetailG - replDetailG) * strength));
+                int b = clampChannel(Color.blue(replacement[index]) + (int) Math.round((ctxDetailB - replDetailB) * strength));
+                replacement[index] = Color.argb(Color.alpha(replacement[index]), r, g, b);
+            }
+        }
+    }
+
+    private int neighborhoodAverage(int[] pixels, int width, int x, int y, int channel) {
+        int sum = 0;
+        for (int yy = y - 1; yy <= y + 1; yy++) {
+            for (int xx = x - 1; xx <= x + 1; xx++) {
+                int color = pixels[yy * width + xx];
+                if (channel == 0) {
+                    sum += Color.red(color);
+                } else if (channel == 1) {
+                    sum += Color.green(color);
+                } else {
+                    sum += Color.blue(color);
+                }
+            }
+        }
+        return sum / 9;
+    }
+
+    private int clampChannel(int value) {
+        return Math.max(0, Math.min(255, value));
     }
 
     private int channelBlend(int src, int context, double srcMean, double srcStd, double ctxMean, double ctxStd, double strength, double edgeMix) {
