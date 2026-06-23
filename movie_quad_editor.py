@@ -16,6 +16,7 @@ from PIL import Image, ImageDraw, ImageTk
 
 SLOT_COUNT = 4
 PREVIEW_MAX = (960, 540)
+TIMELINE_HEIGHT = 86
 KEY_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 MAJOR_PROFILE = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
 MINOR_PROFILE = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
@@ -165,8 +166,7 @@ class VideoState:
     frame_count: int
     width: int
     height: int
-    current_frame: int = 0
-    current_slot: int = 0
+    current_output_frame: int = 0
     edits: dict = field(default_factory=dict)
     source_volume: float = 1.0
     music_path: str = ""
@@ -184,19 +184,23 @@ class VideoState:
     def export_fps(self):
         return self.fps * SLOT_COUNT
 
-    def key(self, frame_index, slot_index):
-        return f"{frame_index}:{slot_index}"
+    @property
+    def output_frame_count(self):
+        return self.frame_count * SLOT_COUNT
 
-    def slot_override(self, frame_index=None, slot_index=None):
-        frame_index = self.current_frame if frame_index is None else frame_index
-        slot_index = self.current_slot if slot_index is None else slot_index
-        return self.edits.get(self.key(frame_index, slot_index))
+    def source_frame_for_output(self, output_frame=None):
+        output_frame = self.current_output_frame if output_frame is None else output_frame
+        return clamp(output_frame // SLOT_COUNT, 0, self.frame_count - 1)
+
+    def frame_override(self, output_frame=None):
+        output_frame = self.current_output_frame if output_frame is None else output_frame
+        return self.edits.get(str(output_frame))
 
 
 class MovieQuadEditor(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Movie Frame Quad Editor")
+        self.title("Video Frame Swapper")
         self.geometry("1180x760")
         self.minsize(980, 660)
 
@@ -205,7 +209,6 @@ class MovieQuadEditor(tk.Tk):
         self.preview_photo = None
         self.exporting = False
         self.video_controls = []
-        self.contact_bounds = None
         self.music_volume_var = tk.DoubleVar(value=50.0)
         self.source_volume_var = tk.DoubleVar(value=100.0)
         self.music_label_var = tk.StringVar(value="No music track")
@@ -213,6 +216,7 @@ class MovieQuadEditor(tk.Tk):
         self.color_blend_var = tk.BooleanVar(value=True)
         self.color_blend_strength_var = tk.DoubleVar(value=65.0)
         self.frequency_blend_strength_var = tk.DoubleVar(value=35.0)
+        self.timeline_zoom_var = tk.DoubleVar(value=1.0)
 
         self._build_ui()
         self._set_controls_enabled(False)
@@ -245,13 +249,22 @@ class MovieQuadEditor(tk.Tk):
 
         self.preview_canvas = tk.Canvas(preview_panel, bg="#151515", highlightthickness=0)
         self.preview_canvas.grid(row=0, column=0, sticky="nsew")
-        self.preview_canvas.bind("<Button-1>", self.on_preview_click)
+
+        timeline_frame = ttk.Frame(preview_panel)
+        timeline_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        timeline_frame.columnconfigure(1, weight=1)
+        ttk.Button(timeline_frame, text="-", width=3, command=lambda: self.adjust_timeline_zoom(0.5)).grid(row=0, column=0, padx=(0, 6))
+        self.timeline_canvas = tk.Canvas(timeline_frame, height=TIMELINE_HEIGHT, bg="#202020", highlightthickness=0)
+        self.timeline_canvas.grid(row=0, column=1, sticky="ew")
+        self.timeline_canvas.bind("<Button-1>", self.on_timeline_click)
+        self.timeline_canvas.bind("<B1-Motion>", self.on_timeline_click)
+        ttk.Button(timeline_frame, text="+", width=3, command=lambda: self.adjust_timeline_zoom(2.0)).grid(row=0, column=2, padx=(6, 0))
 
         controls = ttk.Frame(main, padding=10)
         controls.columnconfigure(0, weight=1)
         main.add(controls, weight=2)
 
-        ttk.Label(controls, text="Frame").grid(row=0, column=0, sticky="w")
+        ttk.Label(controls, text="Output Frame").grid(row=0, column=0, sticky="w")
         frame_row = ttk.Frame(controls)
         frame_row.grid(row=1, column=0, sticky="ew", pady=(4, 8))
         frame_row.columnconfigure(1, weight=1)
@@ -267,30 +280,13 @@ class MovieQuadEditor(tk.Tk):
         self.frame_slider = ttk.Scale(controls, from_=0, to=0, orient=tk.HORIZONTAL, command=self.on_slider)
         self.frame_slider.grid(row=2, column=0, sticky="ew", pady=(0, 14))
 
-        ttk.Label(controls, text="Duplicate Slot").grid(row=3, column=0, sticky="w")
-        slot_row = ttk.Frame(controls)
-        slot_row.grid(row=4, column=0, sticky="ew", pady=(4, 12))
-        self.slot_var = tk.IntVar(value=0)
-        self.slot_buttons = []
-        for i in range(SLOT_COUNT):
-            slot_row.columnconfigure(i, weight=1)
-            slot_button = ttk.Radiobutton(
-                slot_row,
-                text=f"Slot {i + 1}",
-                value=i,
-                variable=self.slot_var,
-                command=self.on_slot_changed,
-            )
-            slot_button.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 4, 0))
-            self.slot_buttons.append(slot_button)
-
         edit_row = ttk.Frame(controls)
-        edit_row.grid(row=5, column=0, sticky="ew", pady=(0, 12))
+        edit_row.grid(row=3, column=0, sticky="ew", pady=(0, 12))
         edit_row.columnconfigure(0, weight=1)
         edit_row.columnconfigure(1, weight=1)
-        self.replace_button = ttk.Button(edit_row, text="Replace Slot", command=self.replace_slot)
+        self.replace_button = ttk.Button(edit_row, text="Replace Frame", command=self.replace_frame)
         self.replace_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self.clear_button = ttk.Button(edit_row, text="Clear Slot", command=self.clear_slot)
+        self.clear_button = ttk.Button(edit_row, text="Clear Frame", command=self.clear_frame)
         self.clear_button.grid(row=0, column=1, sticky="ew")
 
         self.color_blend_check = ttk.Checkbutton(
@@ -299,8 +295,8 @@ class MovieQuadEditor(tk.Tk):
             variable=self.color_blend_var,
             command=self.on_color_blend_changed,
         )
-        self.color_blend_check.grid(row=6, column=0, sticky="ew", pady=(0, 4))
-        ttk.Label(controls, text="Color Blend Strength").grid(row=7, column=0, sticky="w")
+        self.color_blend_check.grid(row=4, column=0, sticky="ew", pady=(0, 4))
+        ttk.Label(controls, text="Color Blend Strength").grid(row=5, column=0, sticky="w")
         self.color_blend_slider = ttk.Scale(
             controls,
             from_=0,
@@ -309,8 +305,8 @@ class MovieQuadEditor(tk.Tk):
             variable=self.color_blend_strength_var,
             command=self.on_color_blend_changed,
         )
-        self.color_blend_slider.grid(row=8, column=0, sticky="ew", pady=(2, 10))
-        ttk.Label(controls, text="Image Frequency Blend").grid(row=9, column=0, sticky="w")
+        self.color_blend_slider.grid(row=6, column=0, sticky="ew", pady=(2, 10))
+        ttk.Label(controls, text="Image Frequency Blend").grid(row=7, column=0, sticky="w")
         self.frequency_blend_slider = ttk.Scale(
             controls,
             from_=0,
@@ -319,7 +315,18 @@ class MovieQuadEditor(tk.Tk):
             variable=self.frequency_blend_strength_var,
             command=self.on_color_blend_changed,
         )
-        self.frequency_blend_slider.grid(row=10, column=0, sticky="ew", pady=(2, 10))
+        self.frequency_blend_slider.grid(row=8, column=0, sticky="ew", pady=(2, 10))
+
+        ttk.Label(controls, text="Timeline Zoom").grid(row=9, column=0, sticky="w")
+        self.timeline_zoom_slider = ttk.Scale(
+            controls,
+            from_=1,
+            to=80,
+            orient=tk.HORIZONTAL,
+            variable=self.timeline_zoom_var,
+            command=self.on_timeline_zoom_changed,
+        )
+        self.timeline_zoom_slider.grid(row=10, column=0, sticky="ew", pady=(2, 10))
 
         ttk.Separator(controls).grid(row=11, column=0, sticky="ew", pady=8)
 
@@ -390,7 +397,7 @@ class MovieQuadEditor(tk.Tk):
             self.source_volume_slider,
             self.music_volume_slider,
             self.tone_match_button,
-            *self.slot_buttons,
+            self.timeline_zoom_slider,
         ]
 
     def _set_controls_enabled(self, enabled):
@@ -436,7 +443,7 @@ class MovieQuadEditor(tk.Tk):
         self.load_edits()
 
         self.video_label.configure(text=str(video_path))
-        self.frame_slider.configure(to=max(0, frame_count - 1))
+        self.frame_slider.configure(to=max(0, self.state.output_frame_count - 1))
         self._set_controls_enabled(True)
         self.status_var.set("Loaded video.")
         self.update_info()
@@ -448,7 +455,7 @@ class MovieQuadEditor(tk.Tk):
         try:
             data = json.loads(self.state.edit_path.read_text(encoding="utf-8"))
             if data.get("video") == str(self.state.video_path):
-                self.state.edits = data.get("edits", {})
+                self.state.edits = self.normalize_edit_map(data.get("edits", {}))
                 self.state.source_volume = float(data.get("source_volume", 1.0))
                 self.state.music_path = data.get("music_path", "")
                 self.state.music_volume = float(data.get("music_volume", 0.5))
@@ -458,9 +465,23 @@ class MovieQuadEditor(tk.Tk):
                 self.state.frame_frequency_blend_strength = float(data.get("frame_frequency_blend_strength", 0.35))
                 self.sync_color_blend_controls()
                 self.sync_music_controls()
-                self.status_var.set(f"Loaded {len(self.state.edits)} saved slot edits.")
+                self.status_var.set(f"Loaded {len(self.state.edits)} saved frame swaps.")
         except Exception as exc:
             messagebox.showwarning("Load Edits", f"Could not load saved edit map:\n{exc}")
+
+    def normalize_edit_map(self, edits):
+        normalized = {}
+        for key, value in edits.items():
+            if ":" in key:
+                try:
+                    frame_text, slot_text = key.split(":", 1)
+                    output_frame = int(frame_text) * SLOT_COUNT + int(slot_text)
+                    normalized[str(output_frame)] = value
+                except ValueError:
+                    continue
+            else:
+                normalized[str(key)] = value
+        return normalized
 
     def save_edits(self):
         if not self.state:
@@ -470,7 +491,7 @@ class MovieQuadEditor(tk.Tk):
             "fps": self.state.fps,
             "width": self.state.width,
             "height": self.state.height,
-            "slot_count": SLOT_COUNT,
+            "output_fps_multiplier": SLOT_COUNT,
             "edits": self.state.edits,
             "source_volume": self.state.source_volume,
             "music_path": self.state.music_path,
@@ -516,11 +537,12 @@ class MovieQuadEditor(tk.Tk):
             return None
         return frame
 
-    def get_slot_frame(self, frame_index, slot_index):
-        override = self.state.slot_override(frame_index, slot_index)
+    def get_output_frame(self, output_frame):
+        source_frame = self.state.source_frame_for_output(output_frame)
+        override = self.state.frame_override(output_frame)
         if override and Path(override).exists():
-            return self.make_replacement_frame(frame_index, override)
-        return self.read_frame(frame_index)
+            return self.make_replacement_frame(source_frame, override)
+        return self.read_frame(source_frame)
 
     def read_frame_from_video(self, frame_index):
         cap = cv2.VideoCapture(str(self.state.video_path))
@@ -548,7 +570,7 @@ class MovieQuadEditor(tk.Tk):
     def show_current_frame(self):
         if not self.state:
             return
-        image = self.make_slot_contact_sheet()
+        image = self.make_frame_preview()
         self.preview_photo = ImageTk.PhotoImage(image)
         self.preview_canvas.delete("all")
         canvas_width = max(1, self.preview_canvas.winfo_width())
@@ -556,86 +578,87 @@ class MovieQuadEditor(tk.Tk):
         x = canvas_width // 2
         y = canvas_height // 2
         self.preview_canvas.create_image(x, y, image=self.preview_photo)
-        self.contact_bounds = (
-            x - image.width // 2,
-            y - image.height // 2,
-            image.width // 2,
-            image.height // 2,
-        )
 
-        self.frame_var.set(str(self.state.current_frame))
-        self.frame_slider.set(self.state.current_frame)
-        self.slot_var.set(self.state.current_slot)
+        self.frame_var.set(str(self.state.current_output_frame))
+        self.frame_slider.set(self.state.current_output_frame)
         self.update_info()
+        self.draw_timeline()
 
-    def make_slot_contact_sheet(self):
+    def make_frame_preview(self):
         canvas_width = max(640, self.preview_canvas.winfo_width() or PREVIEW_MAX[0])
         canvas_height = max(420, self.preview_canvas.winfo_height() or PREVIEW_MAX[1])
         sheet_width = min(PREVIEW_MAX[0], canvas_width - 24)
         sheet_height = min(PREVIEW_MAX[1], canvas_height - 24)
-        tile_width = sheet_width // 2
-        tile_height = sheet_height // 2
-        sheet = Image.new("RGB", (tile_width * 2, tile_height * 2), "#101010")
+        sheet = Image.new("RGB", (sheet_width, sheet_height), "#101010")
         draw = ImageDraw.Draw(sheet)
-
-        for slot_index in range(SLOT_COUNT):
-            frame = self.get_slot_frame(self.state.current_frame, slot_index)
-            if frame is None:
-                tile = Image.new("RGB", (tile_width, tile_height), "#222222")
-            else:
-                tile = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                tile.thumbnail((tile_width - 18, tile_height - 38), Image.Resampling.LANCZOS)
-                background = Image.new("RGB", (tile_width, tile_height), "#181818")
-                background.paste(tile, ((tile_width - tile.width) // 2, (tile_height - tile.height) // 2 + 12))
-                tile = background
-
-            x = (slot_index % 2) * tile_width
-            y = (slot_index // 2) * tile_height
-            sheet.paste(tile, (x, y))
-
-            selected = slot_index == self.state.current_slot
-            border = "#48a6ff" if selected else "#444444"
-            width = 5 if selected else 2
-            for inset in range(width):
-                draw.rectangle(
-                    [x + inset, y + inset, x + tile_width - 1 - inset, y + tile_height - 1 - inset],
-                    outline=border,
-                )
-
-            override = self.state.slot_override(self.state.current_frame, slot_index)
-            label = f"Slot {slot_index + 1}" + ("  custom" if override else "  source")
-            draw.rectangle([x + 8, y + 8, x + 168, y + 32], fill="#000000")
-            draw.text((x + 14, y + 13), label, fill="#ffffff")
-
+        frame = self.get_output_frame(self.state.current_output_frame)
+        if frame is not None:
+            image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            image.thumbnail((sheet_width - 24, sheet_height - 48), Image.Resampling.LANCZOS)
+            sheet.paste(image, ((sheet_width - image.width) // 2, (sheet_height - image.height) // 2 + 10))
+        override = self.state.frame_override()
+        label = f"Frame {self.state.current_output_frame}  source {self.state.source_frame_for_output()}"
+        if override:
+            label += "  swapped"
+        draw.rectangle([10, 10, 260, 36], fill="#000000")
+        draw.text((18, 17), label, fill="#ffffff")
         return sheet
 
-    def on_preview_click(self, event):
-        if not self.state or not self.contact_bounds:
+    def draw_timeline(self):
+        if not self.state:
             return
-        left, top, half_width, half_height = self.contact_bounds
-        local_x = event.x - left
-        local_y = event.y - top
-        if local_x < 0 or local_y < 0 or local_x >= half_width * 2 or local_y >= half_height * 2:
+        canvas = self.timeline_canvas
+        canvas.delete("all")
+        width = max(1, canvas.winfo_width())
+        height = TIMELINE_HEIGHT
+        total = max(1, self.state.output_frame_count)
+        zoom = max(1.0, self.timeline_zoom_var.get())
+        visible = max(12, int(total / zoom))
+        current = self.state.current_output_frame
+        start = clamp(current - visible // 2, 0, max(0, total - visible))
+        end = min(total, start + visible)
+        canvas.create_rectangle(0, 0, width, height, fill="#202020", outline="")
+        for i in range(start, end):
+            x = int((i - start) / max(1, end - start) * width)
+            x2 = int((i + 1 - start) / max(1, end - start) * width)
+            if str(i) in self.state.edits:
+                fill = "#f59e0b"
+            elif i % SLOT_COUNT == 0:
+                fill = "#4b5563"
+            else:
+                fill = "#374151"
+            canvas.create_rectangle(x, 28, max(x + 1, x2), 62, fill=fill, outline="")
+        play_x = int((current - start) / max(1, end - start) * width)
+        canvas.create_line(play_x, 10, play_x, height - 8, fill="#48a6ff", width=3)
+        canvas.create_text(8, 10, anchor="nw", text=f"{start} - {end - 1} / {total - 1}", fill="#e5e7eb")
+        canvas.create_text(width - 8, 10, anchor="ne", text=f"zoom {zoom:.1f}x", fill="#e5e7eb")
+
+    def on_timeline_click(self, event):
+        if not self.state:
             return
-        col = 0 if local_x < half_width else 1
-        row = 0 if local_y < half_height else 1
-        self.state.current_slot = row * 2 + col
+        width = max(1, self.timeline_canvas.winfo_width())
+        total = max(1, self.state.output_frame_count)
+        zoom = max(1.0, self.timeline_zoom_var.get())
+        visible = max(12, int(total / zoom))
+        start = clamp(self.state.current_output_frame - visible // 2, 0, max(0, total - visible))
+        frame = start + int(clamp(event.x / width, 0.0, 1.0) * max(1, visible - 1))
+        self.state.current_output_frame = clamp(frame, 0, total - 1)
         self.show_current_frame()
 
     def update_info(self):
         if not self.state:
             self.info_var.set("")
             return
-        override = self.state.slot_override()
-        slot_text = "custom image" if override else "source frame copy"
+        override = self.state.frame_override()
+        frame_text = "swapped image" if override else "source video frame"
         self.info_var.set(
             f"Source frames: {self.state.frame_count}\n"
             f"Source FPS: {self.state.fps:.3f}\n"
-            f"Export frames: {self.state.frame_count * SLOT_COUNT}\n"
+            f"Export frames: {self.state.output_frame_count}\n"
             f"Export FPS: {self.state.export_fps:.3f}\n"
             f"Duration: {self.state.duration:.2f} seconds\n"
-            f"Edited slots: {len(self.state.edits)}\n"
-            f"Current slot: {slot_text}\n"
+            f"Swapped frames: {len(self.state.edits)}\n"
+            f"Current frame: {frame_text}\n"
             f"Music track: {'yes' if self.state.music_path else 'no'}\n"
             f"Color blend: {'on' if self.state.frame_color_blend else 'off'}"
         )
@@ -643,7 +666,11 @@ class MovieQuadEditor(tk.Tk):
     def move_frame(self, delta):
         if not self.state:
             return
-        self.state.current_frame = clamp(self.state.current_frame + delta, 0, self.state.frame_count - 1)
+        self.state.current_output_frame = clamp(
+            self.state.current_output_frame + delta,
+            0,
+            self.state.output_frame_count - 1,
+        )
         self.show_current_frame()
 
     def goto_frame_entry(self):
@@ -652,29 +679,32 @@ class MovieQuadEditor(tk.Tk):
         try:
             frame = int(self.frame_var.get())
         except ValueError:
-            frame = self.state.current_frame
-        self.state.current_frame = clamp(frame, 0, self.state.frame_count - 1)
+            frame = self.state.current_output_frame
+        self.state.current_output_frame = clamp(frame, 0, self.state.output_frame_count - 1)
         self.show_current_frame()
 
     def on_slider(self, value):
         if not self.state:
             return
         frame = int(float(value))
-        if frame != self.state.current_frame:
-            self.state.current_frame = frame
+        if frame != self.state.current_output_frame:
+            self.state.current_output_frame = frame
             self.show_current_frame()
 
-    def on_slot_changed(self):
+    def on_timeline_zoom_changed(self, _value=None):
         if not self.state:
             return
-        self.state.current_slot = self.slot_var.get()
-        self.show_current_frame()
+        self.draw_timeline()
 
-    def replace_slot(self):
+    def adjust_timeline_zoom(self, factor):
+        self.timeline_zoom_var.set(clamp(self.timeline_zoom_var.get() * factor, 1.0, 80.0))
+        self.draw_timeline()
+
+    def replace_frame(self):
         if not self.state:
             return
         path = filedialog.askopenfilename(
-            title="Choose Replacement Image",
+            title="Choose Image For This Frame",
             filetypes=[
                 ("Image files", "*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff"),
                 ("All files", "*.*"),
@@ -685,16 +715,16 @@ class MovieQuadEditor(tk.Tk):
         try:
             Image.open(path).verify()
         except Exception:
-            messagebox.showerror("Replace Slot", "That file does not look like a readable image.")
+            messagebox.showerror("Replace Frame", "That file does not look like a readable image.")
             return
-        self.state.edits[self.state.key(self.state.current_frame, self.state.current_slot)] = str(Path(path))
+        self.state.edits[str(self.state.current_output_frame)] = str(Path(path))
         self.save_edits()
         self.show_current_frame()
 
-    def clear_slot(self):
+    def clear_frame(self):
         if not self.state:
             return
-        key = self.state.key(self.state.current_frame, self.state.current_slot)
+        key = str(self.state.current_output_frame)
         if key in self.state.edits:
             del self.state.edits[key]
             self.save_edits()
@@ -798,7 +828,8 @@ class MovieQuadEditor(tk.Tk):
                 if not ok:
                     break
                 for slot_index in range(SLOT_COUNT):
-                    override = self.state.slot_override(frame_index, slot_index)
+                    output_frame = frame_index * SLOT_COUNT + slot_index
+                    override = self.state.frame_override(output_frame)
                     if override and Path(override).exists():
                         out_frame = self.make_replacement_frame(frame_index, override)
                     else:
