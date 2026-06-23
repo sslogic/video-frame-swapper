@@ -68,15 +68,17 @@ Nothing is installed globally.
 1. Click `Open Video`.
 2. Move through the video with the frame slider or arrow buttons.
 3. Use the timeline or frame box to choose the exact frame.
-4. Click `Replace Frame` and pick an image.
-5. Use `Color blend replacement images` if you want the replacement image matched to nearby frames.
-6. Use `Color Blend Strength` for more or less color matching.
-7. Use `Image Frequency Blend` for more or less detail/texture matching from nearby frames.
-8. Click `Add Music` if you want a second track.
-9. Use `Original Soundtrack Volume` to raise or lower the video audio.
-10. Use `Added Music Volume` to raise or lower the added track.
-11. Click `Tone Match + Half Volume` to set the added track to 50% and pitch-match it to the original audio.
-12. Click `Export Video`.
+4. Click `Import Image` to load the picture you want to use.
+5. Click `Edit Imported` to prepare it before placing it into the video.
+6. In the editor window, change the background color, use a background image, fade the original frame, fade the imported image, add colored text, paint, or use spray paint opacity.
+7. Click `Apply To Selected Frame` to use the edited image on that frame.
+8. Click `Replace Frame` if you want to skip the editor and pick an image directly.
+9. Click `Play Preview` to watch the swapped frames in the main preview. Preview playback runs at `3 x` the original video FPS.
+10. Click `Add Music` if you want a second track.
+11. Use `Original Soundtrack Volume` to raise or lower the video audio.
+12. Use `Added Music Volume` to raise or lower the added track.
+13. Click `Tone Match + Half Volume` to set the added track to 50% and pitch-match it to the original audio.
+14. Click `Export Video`.
 
 The editor saves a `.quad_edits.json` file next to the video. That file stores the swapped frame numbers and audio settings for that video.
 

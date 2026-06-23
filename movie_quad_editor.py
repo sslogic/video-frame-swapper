@@ -1,11 +1,12 @@
 import json
+import random
 import shutil
 import subprocess
 import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import colorchooser, filedialog, messagebox, ttk
 import tkinter as tk
 
 import cv2
@@ -15,6 +16,7 @@ from PIL import Image, ImageDraw, ImageTk
 
 
 SLOT_COUNT = 4
+PREVIEW_PLAYBACK_MULTIPLIER = 3
 PREVIEW_MAX = (960, 540)
 TIMELINE_HEIGHT = 86
 KEY_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
@@ -208,7 +210,12 @@ class MovieQuadEditor(tk.Tk):
         self.capture = None
         self.preview_photo = None
         self.exporting = False
+        self.playing = False
+        self.play_after_id = None
         self.video_controls = []
+        self.imported_image_path = None
+        self.imported_image = None
+        self.editor_state = None
         self.music_volume_var = tk.DoubleVar(value=50.0)
         self.source_volume_var = tk.DoubleVar(value=100.0)
         self.music_label_var = tk.StringVar(value="No music track")
@@ -235,9 +242,11 @@ class MovieQuadEditor(tk.Tk):
         self.save_button.grid(row=0, column=1, padx=(0, 8))
         self.export_button = ttk.Button(topbar, text="Export Video", command=self.export_video)
         self.export_button.grid(row=0, column=2, padx=(0, 12))
+        self.play_button = ttk.Button(topbar, text="Play Preview", command=self.toggle_playback)
+        self.play_button.grid(row=0, column=3, padx=(0, 12))
 
         self.video_label = ttk.Label(topbar, text="No video loaded")
-        self.video_label.grid(row=0, column=3, columnspan=2, sticky="w")
+        self.video_label.grid(row=0, column=4, sticky="w")
 
         main = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         main.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
@@ -296,10 +305,16 @@ class MovieQuadEditor(tk.Tk):
         edit_row.grid(row=3, column=0, sticky="ew", pady=(0, 12))
         edit_row.columnconfigure(0, weight=1)
         edit_row.columnconfigure(1, weight=1)
+        edit_row.columnconfigure(2, weight=1)
+        edit_row.columnconfigure(3, weight=1)
+        self.import_button = ttk.Button(edit_row, text="Import Image", command=self.import_image)
+        self.import_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.edit_image_button = ttk.Button(edit_row, text="Edit Imported", command=self.open_import_editor)
+        self.edit_image_button.grid(row=0, column=1, sticky="ew", padx=(0, 6))
         self.replace_button = ttk.Button(edit_row, text="Replace Frame", command=self.replace_frame)
-        self.replace_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.replace_button.grid(row=0, column=2, sticky="ew", padx=(0, 6))
         self.clear_button = ttk.Button(edit_row, text="Clear Frame", command=self.clear_frame)
-        self.clear_button.grid(row=0, column=1, sticky="ew")
+        self.clear_button.grid(row=0, column=3, sticky="ew")
 
         self.color_blend_check = ttk.Checkbutton(
             controls,
@@ -395,10 +410,13 @@ class MovieQuadEditor(tk.Tk):
         self.video_controls = [
             self.save_button,
             self.export_button,
+            self.play_button,
             self.prev_button,
             self.frame_entry,
             self.next_button,
             self.frame_slider,
+            self.import_button,
+            self.edit_image_button,
             self.replace_button,
             self.clear_button,
             self.color_blend_check,
@@ -447,6 +465,7 @@ class MovieQuadEditor(tk.Tk):
 
         if self.capture:
             self.capture.release()
+        self.stop_playback()
         self.capture = capture
 
         video_path = Path(path)
@@ -596,6 +615,43 @@ class MovieQuadEditor(tk.Tk):
         self.update_info()
         self.draw_timeline()
 
+    def toggle_playback(self):
+        if not self.state:
+            return
+        if self.playing:
+            self.stop_playback()
+            return
+        self.playing = True
+        self.play_button.configure(text="Stop Preview")
+        self.status_var.set(f"Playing preview at {self.state.fps * PREVIEW_PLAYBACK_MULTIPLIER:.3f} FPS.")
+        self.playback_tick()
+
+    def stop_playback(self):
+        self.playing = False
+        if self.play_after_id is not None:
+            try:
+                self.after_cancel(self.play_after_id)
+            except tk.TclError:
+                pass
+            self.play_after_id = None
+        if hasattr(self, "play_button"):
+            try:
+                self.play_button.configure(text="Play Preview")
+            except tk.TclError:
+                pass
+
+    def playback_tick(self):
+        if not self.playing or not self.state:
+            self.stop_playback()
+            return
+        self.show_current_frame()
+        if self.state.current_output_frame >= self.state.output_frame_count - 1:
+            self.stop_playback()
+            return
+        self.state.current_output_frame += 1
+        playback_fps = max(1.0, self.state.fps * PREVIEW_PLAYBACK_MULTIPLIER)
+        self.play_after_id = self.after(max(1, int(round(1000 / playback_fps))), self.playback_tick)
+
     def make_frame_preview(self):
         canvas_width = max(640, self.preview_canvas.winfo_width() or PREVIEW_MAX[0])
         canvas_height = max(420, self.preview_canvas.winfo_height() or PREVIEW_MAX[1])
@@ -698,6 +754,7 @@ class MovieQuadEditor(tk.Tk):
     def on_timeline_click(self, event):
         if not self.state:
             return
+        self.stop_playback()
         self.timeline_canvas.focus_set()
         width = max(1, self.timeline_canvas.winfo_width())
         total = max(1, self.state.output_frame_count)
@@ -745,6 +802,7 @@ class MovieQuadEditor(tk.Tk):
     def move_frame(self, delta):
         if not self.state:
             return
+        self.stop_playback()
         self.state.current_output_frame = clamp(
             self.state.current_output_frame + delta,
             0,
@@ -755,6 +813,7 @@ class MovieQuadEditor(tk.Tk):
     def goto_frame_entry(self):
         if not self.state:
             return
+        self.stop_playback()
         try:
             frame = int(self.frame_var.get())
         except ValueError:
@@ -764,6 +823,8 @@ class MovieQuadEditor(tk.Tk):
 
     def on_slider(self, value):
         if not self.state:
+            return
+        if self.playing:
             return
         frame = int(float(value))
         if frame != self.state.current_output_frame:
@@ -799,6 +860,265 @@ class MovieQuadEditor(tk.Tk):
         self.state.edits[str(self.state.current_output_frame)] = str(Path(path))
         self.save_edits()
         self.show_current_frame()
+
+    def import_image(self):
+        if not self.state:
+            return
+        path = filedialog.askopenfilename(
+            title="Import Image",
+            filetypes=[
+                ("Image files", "*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        try:
+            self.imported_image = Image.open(path).convert("RGBA")
+        except Exception:
+            messagebox.showerror("Import Image", "That file does not look like a readable image.")
+            return
+        self.imported_image_path = Path(path)
+        self.status_var.set(f"Imported {self.imported_image_path.name}.")
+
+    def open_import_editor(self):
+        if not self.state:
+            return
+        if self.imported_image is None:
+            self.import_image()
+            if self.imported_image is None:
+                return
+
+        original_frame = self.read_frame(self.state.source_frame_for_output())
+        if original_frame is None:
+            messagebox.showerror("Edit Imported", "Could not read the frame being replaced.")
+            return
+
+        original = Image.fromarray(cv2.cvtColor(original_frame, cv2.COLOR_BGR2RGB)).convert("RGBA")
+        imported = self.imported_image.copy().convert("RGBA").resize(original.size, Image.Resampling.LANCZOS)
+
+        window = tk.Toplevel(self)
+        window.title("Edit Imported Image")
+        window.geometry("1180x760")
+        window.minsize(980, 640)
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(window, bg="#151515", highlightthickness=0)
+        canvas.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+
+        panel = ttk.Frame(window, padding=10)
+        panel.grid(row=0, column=1, sticky="ns")
+
+        tool_var = tk.StringVar(value="brush")
+        text_var = tk.StringVar(value="Text")
+        brush_color = {"value": "#ffffff"}
+        text_color = {"value": "#ffffff"}
+        bg_color = {"value": "#000000"}
+        state = {
+            "window": window,
+            "canvas": canvas,
+            "original": original,
+            "imported": imported,
+            "background_image": None,
+            "draw_layer": Image.new("RGBA", original.size, (0, 0, 0, 0)),
+            "photo": None,
+            "preview_scale": 1.0,
+            "preview_offset": (0, 0),
+            "frame_opacity": tk.DoubleVar(value=35.0),
+            "image_opacity": tk.DoubleVar(value=100.0),
+            "brush_size": tk.DoubleVar(value=24.0),
+            "paint_opacity": tk.DoubleVar(value=55.0),
+            "tool_var": tool_var,
+            "text_var": text_var,
+            "brush_color": brush_color,
+            "text_color": text_color,
+            "bg_color": bg_color,
+        }
+        self.editor_state = state
+
+        ttk.Label(panel, text="Layer Opacity").grid(row=0, column=0, sticky="w")
+        ttk.Label(panel, text="Original frame").grid(row=1, column=0, sticky="w")
+        ttk.Scale(panel, from_=0, to=100, variable=state["frame_opacity"], command=lambda _v: self.refresh_editor_preview()).grid(row=2, column=0, sticky="ew")
+        ttk.Label(panel, text="Imported image").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=0, to=100, variable=state["image_opacity"], command=lambda _v: self.refresh_editor_preview()).grid(row=4, column=0, sticky="ew")
+
+        ttk.Separator(panel).grid(row=5, column=0, sticky="ew", pady=10)
+        ttk.Button(panel, text="Background Color", command=self.choose_editor_background_color).grid(row=6, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(panel, text="Background Image", command=self.choose_editor_background_image).grid(row=7, column=0, sticky="ew")
+
+        ttk.Separator(panel).grid(row=8, column=0, sticky="ew", pady=10)
+        ttk.Radiobutton(panel, text="Brush", value="brush", variable=tool_var).grid(row=9, column=0, sticky="w")
+        ttk.Radiobutton(panel, text="Spray Paint", value="spray", variable=tool_var).grid(row=10, column=0, sticky="w")
+        ttk.Radiobutton(panel, text="Text", value="text", variable=tool_var).grid(row=11, column=0, sticky="w")
+        ttk.Label(panel, text="Brush thickness").grid(row=12, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=1, to=120, variable=state["brush_size"]).grid(row=13, column=0, sticky="ew")
+        ttk.Label(panel, text="Paint opacity").grid(row=14, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=1, to=100, variable=state["paint_opacity"]).grid(row=15, column=0, sticky="ew")
+        ttk.Button(panel, text="Brush Color", command=self.choose_editor_brush_color).grid(row=16, column=0, sticky="ew", pady=(8, 4))
+
+        ttk.Label(panel, text="Text").grid(row=17, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(panel, textvariable=text_var).grid(row=18, column=0, sticky="ew")
+        ttk.Button(panel, text="Text Color", command=self.choose_editor_text_color).grid(row=19, column=0, sticky="ew", pady=(6, 0))
+
+        ttk.Separator(panel).grid(row=20, column=0, sticky="ew", pady=10)
+        ttk.Button(panel, text="Clear Paint/Text", command=self.clear_editor_paint).grid(row=21, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(panel, text="Apply To Selected Frame", command=self.apply_editor_to_frame).grid(row=22, column=0, sticky="ew")
+
+        panel.columnconfigure(0, weight=1)
+        canvas.bind("<Button-1>", self.on_editor_canvas_click)
+        canvas.bind("<B1-Motion>", self.on_editor_canvas_drag)
+        canvas.bind("<Configure>", lambda _event: self.refresh_editor_preview())
+        self.refresh_editor_preview()
+
+    def editor_canvas_to_image(self, event):
+        state = self.editor_state
+        if not state:
+            return None
+        ox, oy = state["preview_offset"]
+        scale = state["preview_scale"]
+        x = int((event.x - ox) / scale)
+        y = int((event.y - oy) / scale)
+        width, height = state["original"].size
+        if x < 0 or y < 0 or x >= width or y >= height:
+            return None
+        return x, y
+
+    def refresh_editor_preview(self):
+        state = self.editor_state
+        if not state:
+            return
+        canvas = state["canvas"]
+        composed = self.compose_editor_image()
+        canvas_width = max(1, canvas.winfo_width())
+        canvas_height = max(1, canvas.winfo_height())
+        preview = composed.copy()
+        preview.thumbnail((canvas_width - 20, canvas_height - 20), Image.Resampling.LANCZOS)
+        state["preview_scale"] = preview.width / composed.width
+        state["preview_offset"] = ((canvas_width - preview.width) // 2, (canvas_height - preview.height) // 2)
+        state["photo"] = ImageTk.PhotoImage(preview)
+        canvas.delete("all")
+        canvas.create_image(state["preview_offset"][0], state["preview_offset"][1], anchor="nw", image=state["photo"])
+
+    def compose_editor_image(self):
+        state = self.editor_state
+        width, height = state["original"].size
+        background = Image.new("RGBA", (width, height), state["bg_color"]["value"])
+        if state["background_image"] is not None:
+            background = state["background_image"].copy().resize((width, height), Image.Resampling.LANCZOS)
+        frame = state["original"].copy()
+        frame.putalpha(int(clamp(state["frame_opacity"].get(), 0, 100) / 100 * 255))
+        imported = state["imported"].copy()
+        imported.putalpha(int(clamp(state["image_opacity"].get(), 0, 100) / 100 * 255))
+        composed = Image.alpha_composite(background, frame)
+        composed = Image.alpha_composite(composed, imported)
+        return Image.alpha_composite(composed, state["draw_layer"])
+
+    def choose_editor_background_color(self):
+        state = self.editor_state
+        if not state:
+            return
+        color = colorchooser.askcolor(color=state["bg_color"]["value"], title="Background Color")
+        if color and color[1]:
+            state["bg_color"]["value"] = color[1]
+            self.refresh_editor_preview()
+
+    def choose_editor_background_image(self):
+        state = self.editor_state
+        if not state:
+            return
+        path = filedialog.askopenfilename(
+            title="Background Image",
+            filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            state["background_image"] = Image.open(path).convert("RGBA")
+            self.refresh_editor_preview()
+        except Exception:
+            messagebox.showerror("Background Image", "Could not read that image.")
+
+    def choose_editor_brush_color(self):
+        state = self.editor_state
+        if not state:
+            return
+        color = colorchooser.askcolor(color=state["brush_color"]["value"], title="Brush Color")
+        if color and color[1]:
+            state["brush_color"]["value"] = color[1]
+
+    def choose_editor_text_color(self):
+        state = self.editor_state
+        if not state:
+            return
+        color = colorchooser.askcolor(color=state["text_color"]["value"], title="Text Color")
+        if color and color[1]:
+            state["text_color"]["value"] = color[1]
+
+    def rgba_from_hex(self, hex_color, opacity_percent):
+        hex_color = hex_color.lstrip("#")
+        rgb = tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
+        return (*rgb, int(clamp(opacity_percent, 0, 100) / 100 * 255))
+
+    def on_editor_canvas_click(self, event):
+        state = self.editor_state
+        point = self.editor_canvas_to_image(event)
+        if not state or point is None:
+            return
+        if state["tool_var"].get() == "text":
+            draw = ImageDraw.Draw(state["draw_layer"])
+            draw.text(point, state["text_var"].get(), fill=self.rgba_from_hex(state["text_color"]["value"], state["paint_opacity"].get()))
+            self.refresh_editor_preview()
+        else:
+            self.paint_editor_point(point)
+
+    def on_editor_canvas_drag(self, event):
+        state = self.editor_state
+        point = self.editor_canvas_to_image(event)
+        if not state or point is None or state["tool_var"].get() == "text":
+            return
+        self.paint_editor_point(point)
+
+    def paint_editor_point(self, point):
+        state = self.editor_state
+        draw = ImageDraw.Draw(state["draw_layer"])
+        size = max(1, int(state["brush_size"].get()))
+        color = self.rgba_from_hex(state["brush_color"]["value"], state["paint_opacity"].get())
+        x, y = point
+        if state["tool_var"].get() == "spray":
+            radius = size // 2
+            drops = max(12, size * 2)
+            for _ in range(drops):
+                dx = random.randint(-radius, radius)
+                dy = random.randint(-radius, radius)
+                if dx * dx + dy * dy <= radius * radius:
+                    dot = max(1, size // 12)
+                    draw.ellipse([x + dx - dot, y + dy - dot, x + dx + dot, y + dy + dot], fill=color)
+        else:
+            radius = size // 2
+            draw.ellipse([x - radius, y - radius, x + radius, y + radius], fill=color)
+        self.refresh_editor_preview()
+
+    def clear_editor_paint(self):
+        state = self.editor_state
+        if not state:
+            return
+        state["draw_layer"] = Image.new("RGBA", state["original"].size, (0, 0, 0, 0))
+        self.refresh_editor_preview()
+
+    def apply_editor_to_frame(self):
+        if not self.state or not self.editor_state:
+            return
+        edit_dir = self.state.video_path.with_suffix("").parent / ".frame_edits"
+        edit_dir.mkdir(exist_ok=True)
+        output = edit_dir / f"{self.state.video_path.stem}_frame_{self.state.current_output_frame}.png"
+        self.compose_editor_image().convert("RGB").save(output)
+        self.state.edits[str(self.state.current_output_frame)] = str(output)
+        self.save_edits()
+        self.show_current_frame()
+        self.editor_state["window"].destroy()
+        self.editor_state = None
+        self.status_var.set(f"Applied edited image to frame {self.state.current_output_frame}.")
 
     def clear_frame(self):
         if not self.state:
@@ -871,6 +1191,7 @@ class MovieQuadEditor(tk.Tk):
     def export_video(self):
         if not self.state or self.exporting:
             return
+        self.stop_playback()
         output = filedialog.asksaveasfilename(
             title="Export Video",
             defaultextension=".mp4",
