@@ -16,7 +16,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 
 SLOT_COUNT = 4
-PREVIEW_PLAYBACK_MULTIPLIER = 3
+HIGH_FPS_TARGET = 120.0
 PREVIEW_MAX = (960, 540)
 TIMELINE_HEIGHT = 86
 KEY_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
@@ -196,6 +196,7 @@ class VideoState:
     music_path: str = ""
     music_volume: float = 0.5
     music_tone_match: bool = False
+    output_fps_multiplier: int = SLOT_COUNT
     frame_color_blend: bool = True
     frame_color_blend_strength: float = 0.65
     frame_frequency_blend_strength: float = 0.35
@@ -206,15 +207,26 @@ class VideoState:
 
     @property
     def export_fps(self):
-        return self.fps * SLOT_COUNT
+        return HIGH_FPS_TARGET if self.output_fps_multiplier == SLOT_COUNT else self.fps
 
     @property
     def output_frame_count(self):
-        return self.frame_count * SLOT_COUNT
+        if self.output_fps_multiplier == SLOT_COUNT:
+            return max(1, int(round(self.duration * self.export_fps)))
+        return self.frame_count
 
     def source_frame_for_output(self, output_frame=None):
         output_frame = self.current_output_frame if output_frame is None else output_frame
-        return clamp(output_frame // SLOT_COUNT, 0, self.frame_count - 1)
+        if self.output_fps_multiplier == SLOT_COUNT:
+            frame_time = output_frame / self.export_fps
+            return clamp(int(frame_time * self.fps), 0, self.frame_count - 1)
+        return clamp(output_frame, 0, self.frame_count - 1)
+
+    def output_frame_for_source(self, source_frame):
+        source_frame = clamp(source_frame, 0, self.frame_count - 1)
+        if self.output_fps_multiplier == SLOT_COUNT:
+            return clamp(int(round((source_frame / self.fps) * self.export_fps)), 0, self.output_frame_count - 1)
+        return source_frame
 
     def frame_override(self, output_frame=None):
         output_frame = self.current_output_frame if output_frame is None else output_frame
@@ -243,6 +255,7 @@ class MovieQuadEditor(tk.Tk):
         self.source_volume_var = tk.DoubleVar(value=100.0)
         self.music_label_var = tk.StringVar(value="No music track")
         self.music_tone_var = tk.BooleanVar(value=False)
+        self.high_fps_var = tk.BooleanVar(value=True)
         self.color_blend_var = tk.BooleanVar(value=True)
         self.color_blend_strength_var = tk.DoubleVar(value=65.0)
         self.frequency_blend_strength_var = tk.DoubleVar(value=35.0)
@@ -328,8 +341,16 @@ class MovieQuadEditor(tk.Tk):
         self.frame_slider = ttk.Scale(controls, from_=0, to=0, orient=tk.HORIZONTAL, command=self.on_slider)
         self.frame_slider.grid(row=2, column=0, sticky="ew", pady=(0, 14))
 
+        self.high_fps_check = ttk.Checkbutton(
+            controls,
+            text="120 FPS output",
+            variable=self.high_fps_var,
+            command=self.on_output_fps_changed,
+        )
+        self.high_fps_check.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+
         edit_row = ttk.Frame(controls)
-        edit_row.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        edit_row.grid(row=4, column=0, sticky="ew", pady=(0, 12))
         edit_row.columnconfigure(0, weight=1)
         edit_row.columnconfigure(1, weight=1)
         edit_row.columnconfigure(2, weight=1)
@@ -352,8 +373,8 @@ class MovieQuadEditor(tk.Tk):
             variable=self.color_blend_var,
             command=self.on_color_blend_changed,
         )
-        self.color_blend_check.grid(row=4, column=0, sticky="ew", pady=(0, 4))
-        ttk.Label(controls, text="Color Blend Strength").grid(row=5, column=0, sticky="w")
+        self.color_blend_check.grid(row=5, column=0, sticky="ew", pady=(0, 4))
+        ttk.Label(controls, text="Color Blend Strength").grid(row=6, column=0, sticky="w")
         self.color_blend_slider = ttk.Scale(
             controls,
             from_=0,
@@ -362,8 +383,8 @@ class MovieQuadEditor(tk.Tk):
             variable=self.color_blend_strength_var,
             command=self.on_color_blend_changed,
         )
-        self.color_blend_slider.grid(row=6, column=0, sticky="ew", pady=(2, 10))
-        ttk.Label(controls, text="Image Frequency Blend").grid(row=7, column=0, sticky="w")
+        self.color_blend_slider.grid(row=7, column=0, sticky="ew", pady=(2, 10))
+        ttk.Label(controls, text="Image Frequency Blend").grid(row=8, column=0, sticky="w")
         self.frequency_blend_slider = ttk.Scale(
             controls,
             from_=0,
@@ -372,9 +393,9 @@ class MovieQuadEditor(tk.Tk):
             variable=self.frequency_blend_strength_var,
             command=self.on_color_blend_changed,
         )
-        self.frequency_blend_slider.grid(row=8, column=0, sticky="ew", pady=(2, 10))
+        self.frequency_blend_slider.grid(row=9, column=0, sticky="ew", pady=(2, 10))
 
-        ttk.Label(controls, text="Timeline Zoom").grid(row=9, column=0, sticky="w")
+        ttk.Label(controls, text="Timeline Zoom").grid(row=10, column=0, sticky="w")
         self.timeline_zoom_slider = ttk.Scale(
             controls,
             from_=1,
@@ -383,13 +404,13 @@ class MovieQuadEditor(tk.Tk):
             variable=self.timeline_zoom_var,
             command=self.on_timeline_zoom_changed,
         )
-        self.timeline_zoom_slider.grid(row=10, column=0, sticky="ew", pady=(2, 10))
+        self.timeline_zoom_slider.grid(row=11, column=0, sticky="ew", pady=(2, 10))
 
-        ttk.Separator(controls).grid(row=11, column=0, sticky="ew", pady=8)
+        ttk.Separator(controls).grid(row=12, column=0, sticky="ew", pady=8)
 
-        ttk.Label(controls, text="Extra Music Track").grid(row=12, column=0, sticky="w")
+        ttk.Label(controls, text="Extra Music Track").grid(row=13, column=0, sticky="w")
         music_row = ttk.Frame(controls)
-        music_row.grid(row=13, column=0, sticky="ew", pady=(4, 6))
+        music_row.grid(row=14, column=0, sticky="ew", pady=(4, 6))
         music_row.columnconfigure(0, weight=1)
         music_row.columnconfigure(1, weight=1)
         self.add_music_button = ttk.Button(music_row, text="Add Music", command=self.add_music_track)
@@ -397,8 +418,8 @@ class MovieQuadEditor(tk.Tk):
         self.clear_music_button = ttk.Button(music_row, text="Clear Music", command=self.clear_music_track)
         self.clear_music_button.grid(row=0, column=1, sticky="ew")
 
-        ttk.Label(controls, textvariable=self.music_label_var, wraplength=360).grid(row=14, column=0, sticky="ew")
-        ttk.Label(controls, text="Original Soundtrack Volume").grid(row=15, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(controls, textvariable=self.music_label_var, wraplength=360).grid(row=15, column=0, sticky="ew")
+        ttk.Label(controls, text="Original Soundtrack Volume").grid(row=16, column=0, sticky="w", pady=(8, 0))
         self.source_volume_slider = ttk.Scale(
             controls,
             from_=0,
@@ -407,8 +428,8 @@ class MovieQuadEditor(tk.Tk):
             variable=self.source_volume_var,
             command=self.on_source_volume_changed,
         )
-        self.source_volume_slider.grid(row=16, column=0, sticky="ew", pady=(2, 6))
-        ttk.Label(controls, text="Added Music Volume").grid(row=17, column=0, sticky="w", pady=(8, 0))
+        self.source_volume_slider.grid(row=17, column=0, sticky="ew", pady=(2, 6))
+        ttk.Label(controls, text="Added Music Volume").grid(row=18, column=0, sticky="w", pady=(8, 0))
         self.music_volume_slider = ttk.Scale(
             controls,
             from_=0,
@@ -417,25 +438,25 @@ class MovieQuadEditor(tk.Tk):
             variable=self.music_volume_var,
             command=self.on_music_volume_changed,
         )
-        self.music_volume_slider.grid(row=18, column=0, sticky="ew", pady=(2, 6))
+        self.music_volume_slider.grid(row=19, column=0, sticky="ew", pady=(2, 6))
         self.tone_match_button = ttk.Button(
             controls,
             text="Tone Match + Half Volume",
             command=self.apply_tone_match_preset,
         )
-        self.tone_match_button.grid(row=19, column=0, sticky="ew", pady=(0, 10))
+        self.tone_match_button.grid(row=20, column=0, sticky="ew", pady=(0, 10))
 
         self.status_var = tk.StringVar(value="")
         self.status_label = ttk.Label(controls, textvariable=self.status_var, wraplength=360, justify=tk.LEFT)
-        self.status_label.grid(row=20, column=0, sticky="ew", pady=(0, 12))
+        self.status_label.grid(row=21, column=0, sticky="ew", pady=(0, 12))
 
-        ttk.Separator(controls).grid(row=21, column=0, sticky="ew", pady=8)
+        ttk.Separator(controls).grid(row=22, column=0, sticky="ew", pady=8)
 
         self.info_var = tk.StringVar(value="")
-        ttk.Label(controls, textvariable=self.info_var, justify=tk.LEFT, wraplength=360).grid(row=22, column=0, sticky="ew")
+        ttk.Label(controls, textvariable=self.info_var, justify=tk.LEFT, wraplength=360).grid(row=23, column=0, sticky="ew")
 
         self.progress = ttk.Progressbar(controls, mode="determinate")
-        self.progress.grid(row=23, column=0, sticky="ew", pady=(16, 4))
+        self.progress.grid(row=24, column=0, sticky="ew", pady=(16, 4))
 
         self.video_controls = [
             self.save_button,
@@ -447,6 +468,7 @@ class MovieQuadEditor(tk.Tk):
             self.frame_entry,
             self.next_button,
             self.frame_slider,
+            self.high_fps_check,
             self.import_button,
             self.edit_image_button,
             self.replace_button,
@@ -567,7 +589,6 @@ class MovieQuadEditor(tk.Tk):
             return
         self.state.edit_path = Path(project_path)
         self.apply_project_data(data)
-        self.remember_project(Path(project_path))
         self.status_var.set(f"Opened project {Path(project_path).name}.")
         self.show_current_frame()
 
@@ -578,7 +599,6 @@ class MovieQuadEditor(tk.Tk):
             data = json.loads(self.state.edit_path.read_text(encoding="utf-8"))
             if data.get("video") == str(self.state.video_path):
                 self.apply_project_data(data)
-                self.remember_project(self.state.edit_path)
                 self.status_var.set(f"Loaded {len(self.state.edits)} saved frame swaps.")
         except Exception as exc:
             messagebox.showwarning("Load Edits", f"Could not load saved edit map:\n{exc}")
@@ -589,11 +609,22 @@ class MovieQuadEditor(tk.Tk):
         self.state.music_path = data.get("music_path", "")
         self.state.music_volume = float(data.get("music_volume", 0.5))
         self.state.music_tone_match = bool(data.get("music_tone_match", False))
+        self.state.output_fps_multiplier = self.normalize_output_multiplier(data.get("output_fps_multiplier", SLOT_COUNT))
         self.state.frame_color_blend = bool(data.get("frame_color_blend", True))
         self.state.frame_color_blend_strength = float(data.get("frame_color_blend_strength", 0.65))
         self.state.frame_frequency_blend_strength = float(data.get("frame_frequency_blend_strength", 0.35))
+        self.frame_slider.configure(to=max(0, self.state.output_frame_count - 1))
+        self.state.current_output_frame = clamp(self.state.current_output_frame, 0, self.state.output_frame_count - 1)
+        self.sync_output_fps_controls()
         self.sync_color_blend_controls()
         self.sync_music_controls()
+
+    def normalize_output_multiplier(self, value):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            value = SLOT_COUNT
+        return SLOT_COUNT if value == SLOT_COUNT else 1
 
     def normalize_edit_map(self, edits):
         normalized = {}
@@ -617,12 +648,12 @@ class MovieQuadEditor(tk.Tk):
             "fps": self.state.fps,
             "width": self.state.width,
             "height": self.state.height,
-            "output_fps_multiplier": SLOT_COUNT,
             "edits": self.state.edits,
             "source_volume": self.state.source_volume,
             "music_path": self.state.music_path,
             "music_volume": self.state.music_volume,
             "music_tone_match": self.state.music_tone_match,
+            "output_fps_multiplier": self.state.output_fps_multiplier,
             "frame_color_blend": self.state.frame_color_blend,
             "frame_color_blend_strength": self.state.frame_color_blend_strength,
             "frame_frequency_blend_strength": self.state.frame_frequency_blend_strength,
@@ -652,6 +683,29 @@ class MovieQuadEditor(tk.Tk):
             self.music_label_var.set(f"{name} ({self.music_volume_var.get():.0f}%, {suffix})")
         else:
             self.music_label_var.set("No music track")
+
+    def sync_output_fps_controls(self):
+        if not self.state:
+            self.high_fps_var.set(True)
+            return
+        self.high_fps_var.set(self.state.output_fps_multiplier == SLOT_COUNT)
+
+    def on_output_fps_changed(self):
+        if not self.state:
+            return
+        self.stop_playback()
+        source_frame = self.state.source_frame_for_output()
+        self.state.output_fps_multiplier = SLOT_COUNT if self.high_fps_var.get() else 1
+        self.state.current_output_frame = clamp(
+            self.state.output_frame_for_source(source_frame),
+            0,
+            self.state.output_frame_count - 1,
+        )
+        self.frame_slider.configure(to=max(0, self.state.output_frame_count - 1))
+        self.status_var.set(
+            f"120 FPS output {'enabled' if self.state.output_fps_multiplier == SLOT_COUNT else 'disabled'}."
+        )
+        self.show_current_frame()
 
     def sync_color_blend_controls(self):
         if not self.state:
@@ -724,7 +778,7 @@ class MovieQuadEditor(tk.Tk):
             return
         self.playing = True
         self.play_button.configure(text="Stop Preview")
-        self.status_var.set(f"Playing preview at {self.state.fps * PREVIEW_PLAYBACK_MULTIPLIER:.3f} FPS.")
+        self.status_var.set(f"Playing preview at {self.state.export_fps:.3f} FPS.")
         self.playback_tick()
 
     def stop_playback(self):
@@ -750,7 +804,7 @@ class MovieQuadEditor(tk.Tk):
             self.stop_playback()
             return
         self.state.current_output_frame += 1
-        playback_fps = max(1.0, self.state.fps * PREVIEW_PLAYBACK_MULTIPLIER)
+        playback_fps = max(1.0, self.state.export_fps)
         self.play_after_id = self.after(max(1, int(round(1000 / playback_fps))), self.playback_tick)
 
     def make_frame_preview(self):
@@ -809,7 +863,8 @@ class MovieQuadEditor(tk.Tk):
         for output_frame in range(start, end):
             x = int((output_frame - start) / count * width)
             x2 = int((output_frame + 1 - start) / count * width)
-            copy_index = output_frame % SLOT_COUNT
+            source_frame = self.state.source_frame_for_output(output_frame)
+            copy_index = output_frame - self.state.output_frame_for_source(source_frame)
             swapped = str(output_frame) in self.state.edits
             if swapped:
                 fill = "#f59e0b"
@@ -827,12 +882,15 @@ class MovieQuadEditor(tk.Tk):
                 canvas.create_text((x + x2) // 2, 46, text=label, fill="#f8fafc", font=("Segoe UI", 8))
 
     def draw_original_frame_cells(self, canvas, start, end, width):
-        first_source = start // SLOT_COUNT
-        last_source = min(self.state.frame_count - 1, (end - 1) // SLOT_COUNT)
+        first_source = self.state.source_frame_for_output(start)
+        last_source = self.state.source_frame_for_output(end - 1)
         source_count = max(1, last_source - first_source + 1)
         for source_frame in range(first_source, last_source + 1):
-            output_start = source_frame * SLOT_COUNT
-            output_end = output_start + SLOT_COUNT
+            output_start = self.state.output_frame_for_source(source_frame)
+            if source_frame >= self.state.frame_count - 1:
+                output_end = self.state.output_frame_count
+            else:
+                output_end = self.state.output_frame_for_source(source_frame + 1)
             x = int((max(output_start, start) - start) / max(1, end - start) * width)
             x2 = int((min(output_end, end) - start) / max(1, end - start) * width)
             swapped = any(str(i) in self.state.edits for i in range(output_start, output_end))
@@ -885,16 +943,19 @@ class MovieQuadEditor(tk.Tk):
             return
         override = self.state.frame_override()
         frame_text = "swapped image" if override else "source video frame"
-        copy_number = self.state.current_output_frame % SLOT_COUNT + 1
+        source_frame = self.state.source_frame_for_output()
+        copy_number = self.state.current_output_frame - self.state.output_frame_for_source(source_frame) + 1
         copy_text = "original copy" if copy_number == 1 else f"copy {copy_number}"
+        fps_mode = "120 FPS" if self.state.output_fps_multiplier == SLOT_COUNT else "normal"
         self.info_var.set(
             f"Source frames: {self.state.frame_count}\n"
             f"Source FPS: {self.state.fps:.3f}\n"
             f"Export frames: {self.state.output_frame_count}\n"
             f"Export FPS: {self.state.export_fps:.3f}\n"
+            f"FPS mode: {fps_mode}\n"
             f"Duration: {self.state.duration:.2f} seconds\n"
             f"Swapped frames: {len(self.state.edits)}\n"
-            f"Current frame: {self.state.current_output_frame} ({copy_text} of source {self.state.source_frame_for_output()})\n"
+            f"Current frame: {self.state.current_output_frame} ({copy_text} of source {source_frame})\n"
             f"Frame content: {frame_text}\n"
             f"Music track: {'yes' if self.state.music_path else 'no'}\n"
             f"Color blend: {'on' if self.state.frame_color_blend else 'off'}"
@@ -959,8 +1020,8 @@ class MovieQuadEditor(tk.Tk):
             messagebox.showerror("Replace Frame", "That file does not look like a readable image.")
             return
         self.state.edits[str(self.state.current_output_frame)] = str(Path(path))
-        self.save_edits()
         self.show_current_frame()
+        self.status_var.set("Frame replaced. Click Save Edits to keep this change.")
 
     def replace_every_x_frames(self):
         if not self.state:
@@ -998,9 +1059,10 @@ class MovieQuadEditor(tk.Tk):
         for output_frame in range(start_frame, self.state.output_frame_count, interval):
             self.state.edits[str(output_frame)] = str(path)
             count += 1
-        self.save_edits()
         self.show_current_frame()
-        self.status_var.set(f"Replaced {count} frames every {interval} output frames starting at frame {start_frame}.")
+        self.status_var.set(
+            f"Replaced {count} frames every {interval} output frames starting at frame {start_frame}. Click Save Edits to keep this change."
+        )
 
     def import_image(self):
         if not self.state:
@@ -1831,12 +1893,11 @@ class MovieQuadEditor(tk.Tk):
         output = edit_dir / f"{self.state.video_path.stem}_frame_{output_frame}.png"
         self.compose_editor_image().convert("RGB").save(output)
         self.state.edits[str(output_frame)] = str(output)
-        self.save_edits()
         self.state.current_output_frame = output_frame
         self.show_current_frame()
         self.editor_state["window"].destroy()
         self.editor_state = None
-        self.status_var.set(f"Applied edited image to frame {output_frame}.")
+        self.status_var.set(f"Applied edited image to frame {output_frame}. Click Save Edits to keep this change.")
 
     def clear_frame(self):
         if not self.state:
@@ -1844,7 +1905,7 @@ class MovieQuadEditor(tk.Tk):
         key = str(self.state.current_output_frame)
         if key in self.state.edits:
             del self.state.edits[key]
-            self.save_edits()
+            self.status_var.set("Frame cleared. Click Save Edits to keep this change.")
         self.show_current_frame()
 
     def add_music_track(self):
@@ -1862,8 +1923,8 @@ class MovieQuadEditor(tk.Tk):
             return
         self.state.music_path = str(Path(path))
         self.sync_music_controls()
-        self.save_edits()
         self.update_info()
+        self.status_var.set("Music track added. Click Save Edits to keep this change.")
 
     def clear_music_track(self):
         if not self.state:
@@ -1871,8 +1932,8 @@ class MovieQuadEditor(tk.Tk):
         self.state.music_path = ""
         self.state.music_tone_match = False
         self.sync_music_controls()
-        self.save_edits()
         self.update_info()
+        self.status_var.set("Music track cleared. Click Save Edits to keep this change.")
 
     def on_music_volume_changed(self, _value=None):
         if not self.state:
@@ -1903,8 +1964,7 @@ class MovieQuadEditor(tk.Tk):
         self.state.music_volume = 0.5
         self.state.music_tone_match = True
         self.sync_music_controls()
-        self.save_edits()
-        self.status_var.set("Tone match preset enabled and music volume set to 50%.")
+        self.status_var.set("Tone match preset enabled and music volume set to 50%. Click Save Edits to keep this change.")
 
     def export_video(self):
         if not self.state or self.exporting:
@@ -1918,11 +1978,10 @@ class MovieQuadEditor(tk.Tk):
         )
         if not output:
             return
-        self.save_edits()
         self.exporting = True
         self.open_button.configure(state=tk.DISABLED)
         self._set_controls_enabled(False)
-        self.progress.configure(value=0, maximum=self.state.frame_count)
+        self.progress.configure(value=0, maximum=self.state.output_frame_count)
         thread = threading.Thread(target=self._export_worker, args=(Path(output),), daemon=True)
         thread.start()
 
@@ -1941,21 +2000,29 @@ class MovieQuadEditor(tk.Tk):
                 raise RuntimeError("Could not start MP4 writer.")
 
             cap = cv2.VideoCapture(str(self.state.video_path))
-            for frame_index in range(self.state.frame_count):
-                ok, frame = cap.read()
-                if not ok:
-                    break
-                for slot_index in range(SLOT_COUNT):
-                    output_frame = frame_index * SLOT_COUNT + slot_index
-                    override = self.state.frame_override(output_frame)
-                    if override and Path(override).exists():
-                        out_frame = self.make_replacement_frame(frame_index, override)
-                    else:
-                        out_frame = frame
-                    writer.write(out_frame)
-                if frame_index % 5 == 0:
-                    self.after(0, self.progress.configure, {"value": frame_index + 1})
-                    self.after(0, self.status_var.set, f"Exporting frame {frame_index + 1} of {self.state.frame_count}...")
+            current_source_frame = None
+            frame = None
+            for output_frame in range(self.state.output_frame_count):
+                source_frame = self.state.source_frame_for_output(output_frame)
+                if source_frame != current_source_frame:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, source_frame)
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    current_source_frame = source_frame
+                override = self.state.frame_override(output_frame)
+                if override and Path(override).exists():
+                    out_frame = self.make_replacement_frame(source_frame, override)
+                else:
+                    out_frame = frame
+                writer.write(out_frame)
+                if output_frame % 20 == 0:
+                    self.after(0, self.progress.configure, {"value": output_frame + 1})
+                    self.after(
+                        0,
+                        self.status_var.set,
+                        f"Exporting frame {output_frame + 1} of {self.state.output_frame_count}...",
+                    )
             cap.release()
             writer.release()
 
