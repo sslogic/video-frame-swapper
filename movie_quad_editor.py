@@ -526,12 +526,11 @@ class MovieQuadEditor(tk.Tk):
         video_path = Path(path)
         edit_path = video_path.with_suffix(video_path.suffix + ".quad_edits.json")
         self.state = VideoState(video_path, edit_path, fps, frame_count, width, height)
-        self.load_edits()
 
         self.video_label.configure(text=str(video_path))
         self.frame_slider.configure(to=max(0, self.state.output_frame_count - 1))
         self._set_controls_enabled(True)
-        self.status_var.set("Loaded video.")
+        self.status_var.set("Loaded video. Use Open Project to load saved edits.")
         self.update_info()
         self.show_current_frame()
 
