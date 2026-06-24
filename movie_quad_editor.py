@@ -1022,6 +1022,20 @@ class MovieQuadEditor(tk.Tk):
         self.imported_image_path = Path(path)
         self.status_var.set(f"Imported {self.imported_image_path.name}.")
 
+    def fit_image_to_frame(self, image, frame_size):
+        frame_width, frame_height = frame_size
+        image_width, image_height = image.size
+        if image_width <= 0 or image_height <= 0:
+            return Image.new("RGBA", frame_size, (0, 0, 0, 0))
+        scale = min(frame_width / image_width, frame_height / image_height, 1.0)
+        fitted_width = max(1, int(image_width * scale))
+        fitted_height = max(1, int(image_height * scale))
+        if (fitted_width, fitted_height) != image.size:
+            image = image.resize((fitted_width, fitted_height), Image.Resampling.LANCZOS)
+        layer = Image.new("RGBA", frame_size, (0, 0, 0, 0))
+        layer.paste(image, ((frame_width - fitted_width) // 2, (frame_height - fitted_height) // 2), image)
+        return layer
+
     def open_import_editor(self):
         if not self.state:
             return
@@ -1037,7 +1051,7 @@ class MovieQuadEditor(tk.Tk):
             return
 
         original = Image.fromarray(cv2.cvtColor(original_frame, cv2.COLOR_BGR2RGB)).convert("RGBA")
-        imported = self.imported_image.copy().convert("RGBA").resize(original.size, Image.Resampling.LANCZOS)
+        imported = self.fit_image_to_frame(self.imported_image.copy().convert("RGBA"), original.size)
 
         window = tk.Toplevel(self)
         window.title("Edit Imported Image")
@@ -1049,8 +1063,34 @@ class MovieQuadEditor(tk.Tk):
         canvas = tk.Canvas(window, bg="#151515", highlightthickness=0)
         canvas.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
 
-        panel = ttk.Frame(window, padding=10)
-        panel.grid(row=0, column=1, sticky="ns")
+        panel_outer = ttk.Frame(window)
+        panel_outer.grid(row=0, column=1, sticky="ns")
+        panel_canvas = tk.Canvas(panel_outer, width=260, highlightthickness=0)
+        panel_scrollbar = ttk.Scrollbar(panel_outer, orient=tk.VERTICAL, command=panel_canvas.yview)
+        panel = ttk.Frame(panel_canvas, padding=10)
+        panel_window = panel_canvas.create_window((0, 0), window=panel, anchor="nw")
+        panel_canvas.configure(yscrollcommand=panel_scrollbar.set)
+        panel_canvas.grid(row=0, column=0, sticky="ns")
+        panel_scrollbar.grid(row=0, column=1, sticky="ns")
+        panel_outer.rowconfigure(0, weight=1)
+
+        def sync_panel_scroll(_event=None):
+            panel_canvas.configure(scrollregion=panel_canvas.bbox("all"))
+
+        def sync_panel_width(event):
+            panel_canvas.itemconfigure(panel_window, width=event.width)
+
+        def scroll_panel(event):
+            panel_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        panel.bind("<Configure>", sync_panel_scroll)
+        panel_canvas.bind("<Configure>", sync_panel_width)
+        panel_canvas.bind("<MouseWheel>", scroll_panel)
+        panel.bind("<MouseWheel>", scroll_panel)
+        panel_canvas.bind("<Enter>", lambda _event: panel_canvas.bind_all("<MouseWheel>", scroll_panel))
+        panel_canvas.bind("<Leave>", lambda _event: panel_canvas.unbind_all("<MouseWheel>"))
+        panel.bind("<Enter>", lambda _event: panel_canvas.bind_all("<MouseWheel>", scroll_panel))
+        panel.bind("<Leave>", lambda _event: panel_canvas.unbind_all("<MouseWheel>"))
 
         tool_var = tk.StringVar(value="brush")
         text_var = tk.StringVar(value="Text")
