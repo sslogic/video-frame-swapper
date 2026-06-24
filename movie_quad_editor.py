@@ -1022,12 +1022,13 @@ class MovieQuadEditor(tk.Tk):
         self.imported_image_path = Path(path)
         self.status_var.set(f"Imported {self.imported_image_path.name}.")
 
-    def fit_image_to_frame(self, image, frame_size):
+    def fit_image_to_frame(self, image, frame_size, scale_percent=100.0):
         frame_width, frame_height = frame_size
         image_width, image_height = image.size
         if image_width <= 0 or image_height <= 0:
             return Image.new("RGBA", frame_size, (0, 0, 0, 0))
-        scale = min(frame_width / image_width, frame_height / image_height, 1.0)
+        fit_scale = min(frame_width / image_width, frame_height / image_height)
+        scale = fit_scale * (clamp(float(scale_percent), 5.0, 300.0) / 100.0)
         fitted_width = max(1, int(image_width * scale))
         fitted_height = max(1, int(image_height * scale))
         if (fitted_width, fitted_height) != image.size:
@@ -1051,7 +1052,8 @@ class MovieQuadEditor(tk.Tk):
             return
 
         original = Image.fromarray(cv2.cvtColor(original_frame, cv2.COLOR_BGR2RGB)).convert("RGBA")
-        imported = self.fit_image_to_frame(self.imported_image.copy().convert("RGBA"), original.size)
+        imported_source = self.imported_image.copy().convert("RGBA")
+        imported = self.fit_image_to_frame(imported_source, original.size)
 
         window = tk.Toplevel(self)
         window.title("Edit Imported Image")
@@ -1102,6 +1104,8 @@ class MovieQuadEditor(tk.Tk):
             "canvas": canvas,
             "editor_output_frame": editor_output_frame,
             "original": original,
+            "imported_source": imported_source,
+            "imported_content": imported_source.copy(),
             "imported": imported,
             "background_image": None,
             "draw_layer": Image.new("RGBA", original.size, (0, 0, 0, 0)),
@@ -1118,6 +1122,7 @@ class MovieQuadEditor(tk.Tk):
             "preview_offset": (0, 0),
             "frame_opacity": tk.DoubleVar(value=35.0),
             "image_opacity": tk.DoubleVar(value=100.0),
+            "image_size": tk.DoubleVar(value=100.0),
             "image_rotation": tk.DoubleVar(value=0.0),
             "background_remove_tolerance": tk.DoubleVar(value=38.0),
             "brush_size": tk.DoubleVar(value=24.0),
@@ -1142,49 +1147,51 @@ class MovieQuadEditor(tk.Tk):
         ttk.Scale(panel, from_=0, to=100, variable=state["frame_opacity"], command=self.on_editor_layer_control_changed).grid(row=2, column=0, sticky="ew")
         ttk.Label(panel, text="Imported image").grid(row=3, column=0, sticky="w", pady=(8, 0))
         ttk.Scale(panel, from_=0, to=100, variable=state["image_opacity"], command=self.on_editor_layer_control_changed).grid(row=4, column=0, sticky="ew")
-        ttk.Label(panel, text="Imported image rotation").grid(row=5, column=0, sticky="w", pady=(8, 0))
-        ttk.Scale(panel, from_=-180, to=180, variable=state["image_rotation"], command=self.on_editor_layer_control_changed).grid(row=6, column=0, sticky="ew")
+        ttk.Label(panel, text="Imported image size").grid(row=5, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=5, to=300, variable=state["image_size"], command=self.on_imported_image_size_changed).grid(row=6, column=0, sticky="ew")
+        ttk.Label(panel, text="Imported image rotation").grid(row=7, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=-180, to=180, variable=state["image_rotation"], command=self.on_editor_layer_control_changed).grid(row=8, column=0, sticky="ew")
 
-        ttk.Separator(panel).grid(row=7, column=0, sticky="ew", pady=10)
-        ttk.Button(panel, text="Background Color", command=self.choose_editor_background_color).grid(row=8, column=0, sticky="ew", pady=(0, 6))
-        ttk.Button(panel, text="Background Image", command=self.choose_editor_background_image).grid(row=9, column=0, sticky="ew")
+        ttk.Separator(panel).grid(row=9, column=0, sticky="ew", pady=10)
+        ttk.Button(panel, text="Background Color", command=self.choose_editor_background_color).grid(row=10, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(panel, text="Background Image", command=self.choose_editor_background_image).grid(row=11, column=0, sticky="ew")
 
-        ttk.Separator(panel).grid(row=10, column=0, sticky="ew", pady=10)
-        ttk.Radiobutton(panel, text="Brush", value="brush", variable=tool_var).grid(row=11, column=0, sticky="w")
-        ttk.Radiobutton(panel, text="Spray Paint", value="spray", variable=tool_var).grid(row=12, column=0, sticky="w")
-        ttk.Radiobutton(panel, text="Text", value="text", variable=tool_var).grid(row=13, column=0, sticky="w")
-        ttk.Radiobutton(panel, text="Remove BG Click", value="remove_bg", variable=tool_var).grid(row=14, column=0, sticky="w")
-        ttk.Label(panel, text="BG remove tolerance").grid(row=15, column=0, sticky="w", pady=(8, 0))
-        ttk.Scale(panel, from_=5, to=120, variable=state["background_remove_tolerance"]).grid(row=16, column=0, sticky="ew")
-        ttk.Button(panel, text="Auto Remove Image BG", command=self.auto_remove_imported_background).grid(row=17, column=0, sticky="ew", pady=(8, 4))
-        ttk.Label(panel, text="Brush thickness").grid(row=18, column=0, sticky="w", pady=(8, 0))
-        ttk.Scale(panel, from_=1, to=120, variable=state["brush_size"]).grid(row=19, column=0, sticky="ew")
-        ttk.Label(panel, text="Paint opacity").grid(row=20, column=0, sticky="w", pady=(8, 0))
-        ttk.Scale(panel, from_=1, to=100, variable=state["paint_opacity"]).grid(row=21, column=0, sticky="ew")
-        ttk.Button(panel, text="Brush Color", command=self.choose_editor_brush_color).grid(row=22, column=0, sticky="ew", pady=(8, 4))
+        ttk.Separator(panel).grid(row=12, column=0, sticky="ew", pady=10)
+        ttk.Radiobutton(panel, text="Brush", value="brush", variable=tool_var).grid(row=13, column=0, sticky="w")
+        ttk.Radiobutton(panel, text="Spray Paint", value="spray", variable=tool_var).grid(row=14, column=0, sticky="w")
+        ttk.Radiobutton(panel, text="Text", value="text", variable=tool_var).grid(row=15, column=0, sticky="w")
+        ttk.Radiobutton(panel, text="Remove BG Click", value="remove_bg", variable=tool_var).grid(row=16, column=0, sticky="w")
+        ttk.Label(panel, text="BG remove tolerance").grid(row=17, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=5, to=120, variable=state["background_remove_tolerance"]).grid(row=18, column=0, sticky="ew")
+        ttk.Button(panel, text="Auto Remove Image BG", command=self.auto_remove_imported_background).grid(row=19, column=0, sticky="ew", pady=(8, 4))
+        ttk.Label(panel, text="Brush thickness").grid(row=20, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=1, to=120, variable=state["brush_size"]).grid(row=21, column=0, sticky="ew")
+        ttk.Label(panel, text="Paint opacity").grid(row=22, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=1, to=100, variable=state["paint_opacity"]).grid(row=23, column=0, sticky="ew")
+        ttk.Button(panel, text="Brush Color", command=self.choose_editor_brush_color).grid(row=24, column=0, sticky="ew", pady=(8, 4))
 
-        ttk.Label(panel, text="Text").grid(row=23, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(panel, textvariable=text_var).grid(row=24, column=0, sticky="ew")
-        ttk.Button(panel, text="Text Color", command=self.choose_editor_text_color).grid(row=25, column=0, sticky="ew", pady=(6, 0))
-        ttk.Label(panel, text="Text opacity").grid(row=26, column=0, sticky="w", pady=(8, 0))
-        ttk.Scale(panel, from_=0, to=100, variable=state["text_opacity"], command=self.update_selected_text_from_controls).grid(row=27, column=0, sticky="ew")
-        ttk.Label(panel, text="Text camouflage").grid(row=28, column=0, sticky="w", pady=(8, 0))
-        ttk.Scale(panel, from_=0, to=100, variable=state["text_camouflage"], command=self.update_selected_text_from_controls).grid(row=29, column=0, sticky="ew")
-        ttk.Checkbutton(panel, text="Text border", variable=state["text_border_enabled"], command=self.update_selected_text_from_controls).grid(row=30, column=0, sticky="w", pady=(8, 0))
-        ttk.Label(panel, text="Text size").grid(row=31, column=0, sticky="w", pady=(8, 0))
-        ttk.Scale(panel, from_=8, to=300, variable=state["text_size"], command=self.update_selected_text_from_controls).grid(row=32, column=0, sticky="ew")
-        ttk.Label(panel, text="Text thickness").grid(row=33, column=0, sticky="w", pady=(8, 0))
-        ttk.Scale(panel, from_=0, to=24, variable=state["text_thickness"], command=self.update_selected_text_from_controls).grid(row=34, column=0, sticky="ew")
-        ttk.Label(panel, text="Text rotation").grid(row=35, column=0, sticky="w", pady=(8, 0))
-        ttk.Scale(panel, from_=-180, to=180, variable=state["text_rotation"], command=self.update_selected_text_from_controls).grid(row=36, column=0, sticky="ew")
-        ttk.Label(panel, text="Word warp").grid(row=37, column=0, sticky="w", pady=(8, 0))
-        ttk.Scale(panel, from_=-100, to=100, variable=state["text_warp"], command=self.update_selected_text_from_controls).grid(row=38, column=0, sticky="ew")
+        ttk.Label(panel, text="Text").grid(row=25, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(panel, textvariable=text_var).grid(row=26, column=0, sticky="ew")
+        ttk.Button(panel, text="Text Color", command=self.choose_editor_text_color).grid(row=27, column=0, sticky="ew", pady=(6, 0))
+        ttk.Label(panel, text="Text opacity").grid(row=28, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=0, to=100, variable=state["text_opacity"], command=self.update_selected_text_from_controls).grid(row=29, column=0, sticky="ew")
+        ttk.Label(panel, text="Text camouflage").grid(row=30, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=0, to=100, variable=state["text_camouflage"], command=self.update_selected_text_from_controls).grid(row=31, column=0, sticky="ew")
+        ttk.Checkbutton(panel, text="Text border", variable=state["text_border_enabled"], command=self.update_selected_text_from_controls).grid(row=32, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(panel, text="Text size").grid(row=33, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=8, to=300, variable=state["text_size"], command=self.update_selected_text_from_controls).grid(row=34, column=0, sticky="ew")
+        ttk.Label(panel, text="Text thickness").grid(row=35, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=0, to=24, variable=state["text_thickness"], command=self.update_selected_text_from_controls).grid(row=36, column=0, sticky="ew")
+        ttk.Label(panel, text="Text rotation").grid(row=37, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=-180, to=180, variable=state["text_rotation"], command=self.update_selected_text_from_controls).grid(row=38, column=0, sticky="ew")
+        ttk.Label(panel, text="Word warp").grid(row=39, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(panel, from_=-100, to=100, variable=state["text_warp"], command=self.update_selected_text_from_controls).grid(row=40, column=0, sticky="ew")
 
-        ttk.Separator(panel).grid(row=39, column=0, sticky="ew", pady=10)
-        ttk.Button(panel, text="Undo", command=self.undo_editor_change).grid(row=40, column=0, sticky="ew", pady=(0, 6))
-        ttk.Button(panel, text="Delete Selected Text", command=self.delete_selected_text).grid(row=41, column=0, sticky="ew", pady=(0, 6))
-        ttk.Button(panel, text="Clear Paint/Text", command=self.clear_editor_paint).grid(row=42, column=0, sticky="ew", pady=(0, 6))
-        ttk.Button(panel, text="Apply Changes", command=self.apply_editor_to_frame).grid(row=43, column=0, sticky="ew")
+        ttk.Separator(panel).grid(row=41, column=0, sticky="ew", pady=10)
+        ttk.Button(panel, text="Undo", command=self.undo_editor_change).grid(row=42, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(panel, text="Delete Selected Text", command=self.delete_selected_text).grid(row=43, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(panel, text="Clear Paint/Text", command=self.clear_editor_paint).grid(row=44, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(panel, text="Apply Changes", command=self.apply_editor_to_frame).grid(row=45, column=0, sticky="ew")
 
         panel.columnconfigure(0, weight=1)
         canvas.bind("<Button-1>", self.on_editor_canvas_click)
@@ -1219,6 +1226,7 @@ class MovieQuadEditor(tk.Tk):
         return {
             "draw_layer": state["draw_layer"].copy(),
             "imported": state["imported"].copy(),
+            "imported_content": state["imported_content"].copy(),
             "text_objects": [dict(text_obj) for text_obj in state["text_objects"]],
             "selected_index": selected_index,
             "background_image": state["background_image"].copy() if state["background_image"] is not None else None,
@@ -1227,6 +1235,7 @@ class MovieQuadEditor(tk.Tk):
             "text_color": state["text_color"]["value"],
             "frame_opacity": state["frame_opacity"].get(),
             "image_opacity": state["image_opacity"].get(),
+            "image_size": state["image_size"].get(),
             "image_rotation": state["image_rotation"].get(),
             "brush_size": state["brush_size"].get(),
             "paint_opacity": state["paint_opacity"].get(),
@@ -1257,6 +1266,7 @@ class MovieQuadEditor(tk.Tk):
         try:
             state["draw_layer"] = snapshot["draw_layer"].copy()
             state["imported"] = snapshot["imported"].copy()
+            state["imported_content"] = snapshot["imported_content"].copy()
             state["text_objects"] = [dict(text_obj) for text_obj in snapshot["text_objects"]]
             selected_index = snapshot["selected_index"]
             state["selected_text"] = state["text_objects"][selected_index] if selected_index is not None and selected_index < len(state["text_objects"]) else None
@@ -1266,6 +1276,7 @@ class MovieQuadEditor(tk.Tk):
             state["text_color"]["value"] = snapshot["text_color"]
             state["frame_opacity"].set(snapshot["frame_opacity"])
             state["image_opacity"].set(snapshot["image_opacity"])
+            state["image_size"].set(snapshot["image_size"])
             state["image_rotation"].set(snapshot["image_rotation"])
             state["brush_size"].set(snapshot["brush_size"])
             state["paint_opacity"].set(snapshot["paint_opacity"])
@@ -1438,6 +1449,14 @@ class MovieQuadEditor(tk.Tk):
         self.push_editor_undo()
         self.refresh_editor_preview()
 
+    def on_imported_image_size_changed(self, _value=None):
+        state = self.editor_state
+        if not state or state["is_restoring"]:
+            return
+        self.push_editor_undo()
+        state["imported"] = self.fit_image_to_frame(state["imported_content"].copy(), state["original"].size, state["image_size"].get())
+        self.refresh_editor_preview()
+
     def draw_selected_text_box(self):
         state = self.editor_state
         state["duplicate_button_bbox"] = None
@@ -1600,6 +1619,9 @@ class MovieQuadEditor(tk.Tk):
         alpha[mask] = 0
         pixels[:, :, 3] = alpha
         state["imported"] = Image.fromarray(pixels)
+        state["imported_content"] = self.visible_image_content(state["imported"])
+        state["image_size"].set(self.current_content_scale_percent(state["imported_content"], state["original"].size))
+        state["imported"] = self.fit_image_to_frame(state["imported_content"].copy(), state["original"].size, state["image_size"].get())
         self.refresh_editor_preview()
 
     def auto_remove_imported_background(self):
@@ -1625,6 +1647,9 @@ class MovieQuadEditor(tk.Tk):
         alpha[mask] = 0
         pixels[:, :, 3] = alpha
         state["imported"] = Image.fromarray(pixels)
+        state["imported_content"] = self.visible_image_content(state["imported"])
+        state["image_size"].set(self.current_content_scale_percent(state["imported_content"], state["original"].size))
+        state["imported"] = self.fit_image_to_frame(state["imported_content"].copy(), state["original"].size, state["image_size"].get())
         self.refresh_editor_preview()
 
     def connected_background_mask(self, candidate_mask, start_x=None, start_y=None, seed_mask=None):
@@ -1646,6 +1671,22 @@ class MovieQuadEditor(tk.Tk):
             stack.append((x, y + 1))
             stack.append((x, y - 1))
         return visited
+
+    def visible_image_content(self, image):
+        bbox = image.getchannel("A").getbbox()
+        if not bbox:
+            return image
+        return image.crop(bbox)
+
+    def current_content_scale_percent(self, content, frame_size):
+        frame_width, frame_height = frame_size
+        content_width, content_height = content.size
+        if content_width <= 0 or content_height <= 0:
+            return 100.0
+        fit_scale = min(frame_width / content_width, frame_height / content_height)
+        if fit_scale <= 0:
+            return 100.0
+        return clamp(100.0 / fit_scale, 5.0, 300.0)
 
     def on_editor_canvas_click(self, event):
         state = self.editor_state
