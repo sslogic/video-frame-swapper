@@ -249,6 +249,7 @@ class MovieQuadEditor(tk.Tk):
         self.video_controls = []
         self.imported_image_path = None
         self.imported_image = None
+        self.repeat_image_path = None
         self.editor_state = None
         self.recent_projects = load_recent_projects()
         self.music_volume_var = tk.DoubleVar(value=50.0)
@@ -1018,14 +1019,18 @@ class MovieQuadEditor(tk.Tk):
         except Exception:
             messagebox.showerror("Replace Frame", "That file does not look like a readable image.")
             return
-        self.state.edits[str(self.state.current_output_frame)] = str(Path(path))
+        path = Path(path)
+        self.repeat_image_path = path
+        self.state.edits[str(self.state.current_output_frame)] = str(path)
         self.show_current_frame()
         self.status_var.set("Frame replaced. Click Save Edits to keep this change.")
 
     def replace_every_x_frames(self):
         if not self.state:
             return
-        if self.imported_image_path and self.imported_image_path.exists():
+        if self.repeat_image_path and self.repeat_image_path.exists():
+            path = self.repeat_image_path
+        elif self.imported_image_path and self.imported_image_path.exists():
             path = self.imported_image_path
         else:
             path_text = filedialog.askopenfilename(
@@ -1041,6 +1046,7 @@ class MovieQuadEditor(tk.Tk):
             try:
                 self.imported_image = Image.open(path).convert("RGBA")
                 self.imported_image_path = path
+                self.repeat_image_path = path
             except Exception:
                 messagebox.showerror("Replace Every X", "That file does not look like a readable image.")
                 return
@@ -1081,6 +1087,7 @@ class MovieQuadEditor(tk.Tk):
             messagebox.showerror("Import Image", "That file does not look like a readable image.")
             return
         self.imported_image_path = Path(path)
+        self.repeat_image_path = self.imported_image_path
         self.status_var.set(f"Imported {self.imported_image_path.name}.")
 
     def fit_image_to_frame(self, image, frame_size, scale_percent=100.0):
@@ -1891,6 +1898,7 @@ class MovieQuadEditor(tk.Tk):
         edit_dir.mkdir(exist_ok=True)
         output = edit_dir / f"{self.state.video_path.stem}_frame_{output_frame}.png"
         self.compose_editor_image().convert("RGB").save(output)
+        self.repeat_image_path = output
         self.state.edits[str(output_frame)] = str(output)
         self.state.current_output_frame = output_frame
         self.show_current_frame()
