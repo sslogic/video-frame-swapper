@@ -28,6 +28,14 @@ APP_DIR = Path(__file__).resolve().parent
 RECENT_PROJECTS_PATH = APP_DIR / "recent_projects.json"
 
 
+class FixedValue:
+    def __init__(self, value):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+
 def clamp(value, low, high):
     return max(low, min(high, value))
 
@@ -250,6 +258,7 @@ class MovieQuadEditor(tk.Tk):
         self.imported_image_path = None
         self.imported_image = None
         self.repeat_image_path = None
+        self.repeat_editor_template = None
         self.editor_state = None
         self.recent_projects = load_recent_projects()
         self.music_volume_var = tk.DoubleVar(value=50.0)
@@ -1021,6 +1030,7 @@ class MovieQuadEditor(tk.Tk):
             return
         path = Path(path)
         self.repeat_image_path = path
+        self.repeat_editor_template = None
         self.state.edits[str(self.state.current_output_frame)] = str(path)
         self.show_current_frame()
         self.status_var.set("Frame replaced. Click Save Edits to keep this change.")
@@ -1061,9 +1071,21 @@ class MovieQuadEditor(tk.Tk):
             return
         start_frame = self.state.current_output_frame
         count = 0
-        for output_frame in range(start_frame, self.state.output_frame_count, interval):
-            self.state.edits[str(output_frame)] = str(path)
-            count += 1
+        if self.repeat_editor_template:
+            edit_dir = self.state.video_path.with_suffix("").parent / ".frame_edits"
+            edit_dir.mkdir(exist_ok=True)
+            for output_frame in range(start_frame, self.state.output_frame_count, interval):
+                output = edit_dir / f"{self.state.video_path.stem}_frame_{output_frame}.png"
+                custom_image = self.compose_editor_template_image(self.repeat_editor_template, output_frame)
+                if custom_image is None:
+                    continue
+                custom_image.convert("RGB").save(output)
+                self.state.edits[str(output_frame)] = str(output)
+                count += 1
+        else:
+            for output_frame in range(start_frame, self.state.output_frame_count, interval):
+                self.state.edits[str(output_frame)] = str(path)
+                count += 1
         self.show_current_frame()
         self.status_var.set(
             f"Replaced {count} frames every {interval} output frames starting at frame {start_frame}. Click Save Edits to keep this change."
@@ -1088,6 +1110,7 @@ class MovieQuadEditor(tk.Tk):
             return
         self.imported_image_path = Path(path)
         self.repeat_image_path = self.imported_image_path
+        self.repeat_editor_template = None
         self.status_var.set(f"Imported {self.imported_image_path.name}.")
 
     def fit_image_to_frame(self, image, frame_size, scale_percent=100.0):
@@ -1397,70 +1420,102 @@ class MovieQuadEditor(tk.Tk):
         text_width = max(1, bbox[2] - bbox[0])
         text_height = max(1, bbox[3] - bbox[1])
         padding = max(24, stroke_width * 4)
-        tile = Image.new("RGBA", (text_width + padding * 2, text_height + padding * 2), (0, 0, 0, 0))
-        tile_draw = ImageDraw.Draw(tile)
-        fill = self.text_fill_color(text_obj, (text_width, text_height))
-        tile_draw.multiline_text(
+        fill = self.rgba_from_hex(text_obj.get("color", "#ffffff"), text_obj.get("opacity", 100))
+        mask = Image.new("L", (text_width + padding * 2, text_height + padding * 2), 0)
+        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.multiline_text(
             (padding - bbox[0], padding - bbox[1]),
             text,
             font=font,
-            fill=fill,
+            fill=fill[3],
             stroke_width=stroke_width,
-            stroke_fill=(0, 0, 0, fill[3]),
+            stroke_fill=fill[3],
             spacing=max(2, int(text_obj.get("size", 64) * 0.18)),
         )
+        camouflage = clamp(float(text_obj.get("camouflage", 0)), 0, 100) / 100
+        if camouflage > 0:
+            tile = Image.new("RGBA", mask.size, fill)
+            tile.putalpha(mask)
+        else:
+            tile = Image.new("RGBA", mask.size, (0, 0, 0, 0))
+            tile_draw = ImageDraw.Draw(tile)
+            tile_draw.multiline_text(
+                (padding - bbox[0], padding - bbox[1]),
+                text,
+                font=font,
+                fill=fill,
+                stroke_width=stroke_width,
+                stroke_fill=(0, 0, 0, fill[3]),
+                spacing=max(2, int(text_obj.get("size", 64) * 0.18)),
+            )
 
         warp = clamp(float(text_obj.get("warp", 0)), -100, 100) / 100 * 0.65
         if abs(warp) > 0.01:
-            x_shift = int(abs(warp) * tile.height)
-            new_width = tile.width + x_shift
+            x_shift = int(abs(warp) * mask.height)
+            new_width = mask.width + x_shift
             offset = x_shift if warp < 0 else 0
-            tile = tile.transform(
-                (new_width, tile.height),
+            transform_args = (
+                (new_width, mask.height),
                 Image.Transform.AFFINE,
                 (1, warp, -offset, 0, 1, 0),
+            )
+            mask = mask.transform(
+                *transform_args,
                 resample=Image.Resampling.BICUBIC,
             )
+            tile = tile.transform(*transform_args, resample=Image.Resampling.BICUBIC)
 
         rotation = float(text_obj.get("rotation", 0))
         if abs(rotation) > 0.01:
+            mask = mask.rotate(rotation, expand=True, resample=Image.Resampling.BICUBIC)
             tile = tile.rotate(rotation, expand=True, resample=Image.Resampling.BICUBIC)
 
         x = int(text_obj.get("x", 0))
         y = int(text_obj.get("y", 0))
+        if camouflage > 0:
+            tile = self.camouflage_text_tile(mask, fill, camouflage, x, y)
         layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         layer.paste(tile, (x, y), tile)
         return layer, (x, y, x + tile.width, y + tile.height)
 
-    def text_fill_color(self, text_obj, text_size):
-        fill = self.rgba_from_hex(text_obj.get("color", "#ffffff"), text_obj.get("opacity", 100))
-        camouflage = clamp(float(text_obj.get("camouflage", 0)), 0, 100) / 100
-        if camouflage <= 0:
-            return fill
-        sample = self.sample_editor_color_under_text(text_obj, text_size)
-        blended_rgb = tuple(int(fill[index] * (1 - camouflage) + sample[index] * camouflage) for index in range(3))
-        return (*blended_rgb, fill[3])
-
-    def sample_editor_color_under_text(self, text_obj, text_size):
+    def camouflage_text_tile(self, mask, fill, camouflage, x, y):
         state = self.editor_state
         if not state:
-            return (255, 255, 255)
+            tile = Image.new("RGBA", mask.size, fill)
+            tile.putalpha(mask)
+            return tile
         base = self.compose_editor_base(include_draw_layer=True).convert("RGB")
         width, height = base.size
-        x = int(text_obj.get("x", 0))
-        y = int(text_obj.get("y", 0))
-        text_width, text_height = text_size
+        tile_width, tile_height = mask.size
         x1 = max(0, min(width, x))
         y1 = max(0, min(height, y))
-        x2 = max(x1 + 1, min(width, x + max(1, text_width)))
-        y2 = max(y1 + 1, min(height, y + max(1, text_height)))
+        x2 = max(x1, min(width, x + tile_width))
+        y2 = max(y1, min(height, y + tile_height))
         if x1 >= width or y1 >= height:
-            return (255, 255, 255)
-        crop = np.array(base.crop((x1, y1, x2, y2)))
-        if crop.size == 0:
-            return (255, 255, 255)
-        average = crop.reshape(-1, 3).mean(axis=0)
-        return tuple(int(channel) for channel in average)
+            tile = Image.new("RGBA", mask.size, fill)
+            tile.putalpha(mask)
+            return tile
+
+        pattern = Image.new("RGB", mask.size, fill[:3])
+        crop = base.crop((x1, y1, x2, y2))
+        pattern.paste(crop, (x1 - x, y1 - y))
+
+        pattern_pixels = np.array(pattern, dtype=np.float32)
+        mask_pixels = np.array(mask, dtype=np.float32)
+        visible = mask_pixels > 0
+        if np.any(visible):
+            average = pattern_pixels[visible].mean(axis=0)
+            luminance = float(np.dot(average, [0.2126, 0.7152, 0.0722]))
+            shift = 44.0 if luminance < 128 else -44.0
+            pattern_pixels = np.clip(pattern_pixels + shift, 0, 255)
+
+        fill_pixels = np.zeros_like(pattern_pixels)
+        fill_pixels[:, :] = fill[:3]
+        blended = fill_pixels * (1.0 - camouflage) + pattern_pixels * camouflage
+        alpha = np.clip(mask_pixels * (fill[3] / 255.0), 0, 255).astype(np.uint8)
+        result = Image.fromarray(blended.astype(np.uint8), "RGB").convert("RGBA")
+        result.putalpha(Image.fromarray(alpha, "L"))
+        return result
 
     def find_text_at(self, point):
         state = self.editor_state
@@ -1899,12 +1954,59 @@ class MovieQuadEditor(tk.Tk):
         output = edit_dir / f"{self.state.video_path.stem}_frame_{output_frame}.png"
         self.compose_editor_image().convert("RGB").save(output)
         self.repeat_image_path = output
+        self.repeat_editor_template = self.editor_template_from_state(self.editor_state)
         self.state.edits[str(output_frame)] = str(output)
         self.state.current_output_frame = output_frame
         self.show_current_frame()
         self.editor_state["window"].destroy()
         self.editor_state = None
         self.status_var.set(f"Applied edited image to frame {output_frame}. Click Save Edits to keep this change.")
+
+    def editor_template_from_state(self, state):
+        return {
+            "size": state["original"].size,
+            "imported": state["imported"].copy(),
+            "background_image": state["background_image"].copy() if state["background_image"] is not None else None,
+            "draw_layer": state["draw_layer"].copy(),
+            "text_objects": [dict(text_obj) for text_obj in state["text_objects"]],
+            "bg_color": state["bg_color"]["value"],
+            "frame_opacity": state["frame_opacity"].get(),
+            "image_opacity": state["image_opacity"].get(),
+            "image_rotation": state["image_rotation"].get(),
+        }
+
+    def compose_editor_template_image(self, template, output_frame):
+        source_frame = self.state.source_frame_for_output(output_frame)
+        frame = self.read_frame_from_video(source_frame)
+        if frame is None:
+            return None
+        original = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).convert("RGBA")
+        width, height = original.size
+
+        imported = template["imported"].copy()
+        if imported.size != original.size:
+            imported = imported.resize(original.size, Image.Resampling.LANCZOS)
+        draw_layer = template["draw_layer"].copy()
+        if draw_layer.size != original.size:
+            draw_layer = draw_layer.resize(original.size, Image.Resampling.LANCZOS)
+
+        temp_state = {
+            "original": original,
+            "imported": imported,
+            "background_image": template["background_image"].copy() if template["background_image"] is not None else None,
+            "draw_layer": draw_layer,
+            "text_objects": [dict(text_obj) for text_obj in template["text_objects"]],
+            "frame_opacity": FixedValue(template["frame_opacity"]),
+            "image_opacity": FixedValue(template["image_opacity"]),
+            "image_rotation": FixedValue(template["image_rotation"]),
+            "bg_color": {"value": template["bg_color"]},
+        }
+        previous_editor_state = self.editor_state
+        try:
+            self.editor_state = temp_state
+            return self.compose_editor_image()
+        finally:
+            self.editor_state = previous_editor_state
 
     def clear_frame(self):
         if not self.state:
