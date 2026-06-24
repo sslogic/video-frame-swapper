@@ -17,6 +17,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 SLOT_COUNT = 4
 HIGH_FPS_TARGET = 120.0
+PREVIEW_EDIT_DETAIL_RADIUS = 100
 PREVIEW_MAX = (960, 540)
 TIMELINE_HEIGHT = 86
 KEY_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
@@ -787,7 +788,9 @@ class MovieQuadEditor(tk.Tk):
             return
         self.playing = True
         self.play_button.configure(text="Stop Preview")
-        self.status_var.set(f"Playing preview at {self.state.export_fps:.3f} FPS.")
+        self.status_var.set(
+            f"Playing preview at {self.state.export_fps:.3f} FPS. Full detail within {PREVIEW_EDIT_DETAIL_RADIUS} frames of edits."
+        )
         self.playback_tick()
 
     def stop_playback(self):
@@ -812,9 +815,44 @@ class MovieQuadEditor(tk.Tk):
         if self.state.current_output_frame >= self.state.output_frame_count - 1:
             self.stop_playback()
             return
-        self.state.current_output_frame += 1
+        step = self.preview_playback_step(self.state.current_output_frame)
+        self.state.current_output_frame = clamp(
+            self.state.current_output_frame + step,
+            0,
+            self.state.output_frame_count - 1,
+        )
         playback_fps = max(1.0, self.state.export_fps)
-        self.play_after_id = self.after(max(1, int(round(1000 / playback_fps))), self.playback_tick)
+        self.play_after_id = self.after(max(1, int(round(1000 * step / playback_fps))), self.playback_tick)
+
+    def preview_playback_step(self, output_frame):
+        if self.preview_frame_near_edit(output_frame):
+            return 1
+        current_source = self.state.source_frame_for_output(output_frame)
+        next_source_frame = min(self.state.frame_count - 1, current_source + 1)
+        next_source_output = self.state.output_frame_for_source(next_source_frame)
+        if next_source_output <= output_frame:
+            return 1
+        next_edit = self.next_edit_frame(output_frame)
+        if next_edit is not None:
+            next_source_output = min(next_source_output, max(output_frame + 1, next_edit - PREVIEW_EDIT_DETAIL_RADIUS))
+        return max(1, next_source_output - output_frame)
+
+    def preview_frame_near_edit(self, output_frame):
+        edit_frame = self.next_edit_frame(output_frame - PREVIEW_EDIT_DETAIL_RADIUS)
+        if edit_frame is None:
+            return False
+        return abs(edit_frame - output_frame) <= PREVIEW_EDIT_DETAIL_RADIUS
+
+    def next_edit_frame(self, output_frame):
+        candidates = []
+        for key in self.state.edits:
+            try:
+                edit_frame = int(key)
+            except ValueError:
+                continue
+            if edit_frame >= output_frame:
+                candidates.append(edit_frame)
+        return min(candidates) if candidates else None
 
     def make_frame_preview(self):
         canvas_width = max(640, self.preview_canvas.winfo_width() or PREVIEW_MAX[0])
@@ -826,7 +864,12 @@ class MovieQuadEditor(tk.Tk):
         frame = self.get_output_frame(self.state.current_output_frame)
         if frame is not None:
             image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            image.thumbnail((sheet_width - 24, sheet_height - 48), Image.Resampling.LANCZOS)
+            max_image_width = sheet_width - 24
+            max_image_height = sheet_height - 48
+            if self.playing and not self.preview_frame_near_edit(self.state.current_output_frame):
+                max_image_width = max(160, int(max_image_width * 0.55))
+                max_image_height = max(90, int(max_image_height * 0.55))
+            image.thumbnail((max_image_width, max_image_height), Image.Resampling.LANCZOS)
             sheet.paste(image, ((sheet_width - image.width) // 2, (sheet_height - image.height) // 2 + 10))
         override = self.state.frame_override()
         label = f"Frame {self.state.current_output_frame}  source {self.state.source_frame_for_output()}"
