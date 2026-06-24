@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
@@ -254,6 +255,8 @@ class MovieQuadEditor(tk.Tk):
         self.exporting = False
         self.playing = False
         self.play_after_id = None
+        self.playback_started_at = None
+        self.playback_start_frame = 0
         self.video_controls = []
         self.imported_image_path = None
         self.imported_image = None
@@ -786,8 +789,10 @@ class MovieQuadEditor(tk.Tk):
             self.stop_playback()
             return
         self.playing = True
+        self.playback_started_at = time.perf_counter()
+        self.playback_start_frame = self.state.current_output_frame
         self.play_button.configure(text="Stop Preview")
-        self.status_var.set(f"Playing preview at {self.state.export_fps:.3f} FPS.")
+        self.status_var.set(f"Playing preview in real time at {self.state.export_fps:.3f} FPS.")
         self.playback_tick()
 
     def stop_playback(self):
@@ -798,6 +803,7 @@ class MovieQuadEditor(tk.Tk):
             except tk.TclError:
                 pass
             self.play_after_id = None
+        self.playback_started_at = None
         if hasattr(self, "play_button"):
             try:
                 self.play_button.configure(text="Play Preview")
@@ -808,13 +814,24 @@ class MovieQuadEditor(tk.Tk):
         if not self.playing or not self.state:
             self.stop_playback()
             return
+        playback_fps = max(1.0, self.state.export_fps)
+        if self.playback_started_at is None:
+            self.playback_started_at = time.perf_counter()
+            self.playback_start_frame = self.state.current_output_frame
+
+        elapsed = max(0.0, time.perf_counter() - self.playback_started_at)
+        target_frame = self.playback_start_frame + int(elapsed * playback_fps)
+        target_frame = max(self.state.current_output_frame, target_frame)
+        target_frame = clamp(target_frame, 0, self.state.output_frame_count - 1)
+        self.state.current_output_frame = target_frame
         self.show_current_frame()
         if self.state.current_output_frame >= self.state.output_frame_count - 1:
             self.stop_playback()
             return
-        self.state.current_output_frame += 1
-        playback_fps = max(1.0, self.state.export_fps)
-        self.play_after_id = self.after(max(1, int(round(1000 / playback_fps))), self.playback_tick)
+        next_frame = self.state.current_output_frame + 1
+        next_due = self.playback_started_at + ((next_frame - self.playback_start_frame) / playback_fps)
+        delay_ms = max(1, int(round((next_due - time.perf_counter()) * 1000)))
+        self.play_after_id = self.after(delay_ms, self.playback_tick)
 
     def make_frame_preview(self):
         canvas_width = max(640, self.preview_canvas.winfo_width() or PREVIEW_MAX[0])
