@@ -26,10 +26,13 @@ The project has two parts:
 - At max zoom, see the original frame cell followed by copies `2`, `3`, and `4`.
 - Export a same-length MP4 with four frames for every original frame.
 - Keep the original audio when possible.
-- Add a second music track.
-- Raise or lower the original soundtrack volume.
-- Raise or lower the added music volume.
-- Detect the key of the original audio and added music, then pitch-shift the added music to match.
+- Open an Audio Editor popup for the main soundtrack and added audio tracks.
+- Add multiple MP3/audio tracks.
+- Set main-track volume and per-track volume.
+- Set each added track start time, repeat timing, repeat count, and speed from `0.2x` to `5x`.
+- Use track masking to compress peaks and limit loud spikes.
+- Keep added tracks dynamically below the main track with below-main ducking.
+- Detect the key of the original audio and added music, then pitch-shift added tracks to match.
 - Color-match replacement images using the previous and next video frames.
 - Blend image detail/frequency from nearby frames so replacements sit better in motion.
 - Android output uses the system folder picker, so you can save to SD card folders when the phone exposes them.
@@ -74,11 +77,14 @@ Nothing is installed globally.
 7. Click `Apply To Selected Frame` to use the edited image on that frame.
 8. Click `Replace Frame` if you want to skip the editor and pick an image directly.
 9. Click `Play Preview` to watch the swapped frames in the main preview. Preview playback runs at `3 x` the original video FPS.
-10. Click `Add Music` if you want a second track.
-11. Use `Original Soundtrack Volume` to raise or lower the video audio.
-12. Use `Added Music Volume` to raise or lower the added track.
-13. Click `Tone Match + Half Volume` to set the added track to 50% and pitch-match it to the original audio.
-14. Click `Export Video`.
+10. Click `Audio Editor` to work on sound.
+11. Set the main soundtrack volume.
+12. Click `Add Audio Track` and choose an MP3 or other audio file.
+13. Edit each added track's volume, movie start time, repeat timing, repeat count, and speed.
+14. Use `Track masking` to compress peaks and keep that track from spiking.
+15. Use `Keep this track dynamically below the main track` when the added track should duck under the original sound.
+16. Turn on key matching if you want added tracks pitch-shifted to match the original audio.
+17. Click `Export Video`.
 
 The editor saves a `.quad_edits.json` file next to the video. That file stores the swapped frame numbers and audio settings for that video.
 
