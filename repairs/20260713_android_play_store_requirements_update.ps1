@@ -1,3 +1,17 @@
+$ErrorActionPreference = "Stop"
+
+$Root = Split-Path -Parent $PSScriptRoot
+$PlayStore = Join-Path $Root "PLAY_STORE_START.md"
+$BackupDir = Join-Path $Root "backups"
+$Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+
+if (!(Test-Path -LiteralPath $PlayStore)) {
+    throw "Missing file: $PlayStore"
+}
+New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null
+Copy-Item -LiteralPath $PlayStore -Destination (Join-Path $BackupDir "PLAY_STORE_START.md.$Stamp.requirements.bak") -Force
+
+Set-Content -LiteralPath $PlayStore -Value @'
 # Google Play Store Start
 
 Use this as the first checklist for selling the Android app.
@@ -50,3 +64,13 @@ Use this as the first checklist for selling the Android app.
 - Decide whether the app is paid up front, free, or uses in-app purchases.
 - If selling digital goods or subscriptions inside the app, plan for Google Play Billing and service fees.
 - If charging up front only, set the app price in Play Console pricing.
+'@ -NoNewline
+
+$Text = Get-Content -LiteralPath $PlayStore -Raw
+foreach ($Needle in @("signed Android App Bundle", "12 opted-in testers", "14 continuous days", "Google Play Billing", "one-time Google Play developer registration fee")) {
+    if ($Text.IndexOf($Needle, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        throw "Verification failed. Missing Play Store requirement: $Needle"
+    }
+}
+
+Write-Host "Play Store requirements starter updated."
