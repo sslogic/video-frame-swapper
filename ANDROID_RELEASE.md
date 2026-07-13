@@ -1,17 +1,17 @@
 # Android APK
 
-Use this branch for the Android build of Video Frame Swapper.
+Use this branch for the Android build of Mayniak Subliminal Multimedia Studio.
 
 Download the APK:
 
 ```text
-releases/video-frame-swapper-debug.apk
+releases/mayniak-subliminal-multimedia-studio.apk
 ```
 
 Direct GitHub download:
 
 ```text
-https://github.com/sslogic/video-frame-swapper/raw/android-fork/releases/video-frame-swapper-debug.apk
+releases/mayniak-subliminal-multimedia-studio.apk
 ```
 
 Install on Android:
@@ -19,7 +19,7 @@ Install on Android:
 1. Download the APK on the phone.
 2. Open the file.
 3. Allow installs from the browser or file manager if Android asks.
-4. Install `Video Frame Swapper`.
+4. Install `Mayniak Subliminal Multimedia Studio`.
 5. Open the app.
 
 The app lets you choose the export folder with Android's folder picker. If your phone shows the SD card in that picker, choose the SD card folder and the export will save there.
@@ -31,3 +31,5 @@ Use `Edit Image/Text` to work on the selected output frame. It can resize and ro
 Use `Replace Every X` when you want the same image placed every chosen number of output frames from the current timeline position.
 
 This APK includes output-frame blending, so replacements are blended against the previous and next output frames instead of treating a four-frame source group as one block.
+
+Audio Editor adds multiple audio tracks with volume, start time, repeat timing, repeat count, speed, masking, below-main ducking, key matching, and the option to use the first added track as the main masking track when the video has no audio.

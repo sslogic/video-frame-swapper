@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $PSScriptRoot
-$MainPath = Join-Path $Root "android\app\src\main\java\com\sslogic\videoframeswapper\MainActivity.java"
+$MainPath = Join-Path $Root "android\app\src\main\java\com\mayniak\subliminalstudio\MainActivity.java"
 $BackupDir = Join-Path $Root "backups"
 $Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 

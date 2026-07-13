@@ -1,6 +1,6 @@
-# Video Frame Swapper
+# Mayniak Subliminal Multimedia Studio
 
-Video Frame Swapper is a small editor for replacing exact frames in a video.
+Mayniak Subliminal Multimedia Studio is a small editor for replacing exact frames in a video.
 
 For every frame in the source video, the editor still creates four output frames and raises the output FPS by 4x. That keeps the finished video the same length. You do not edit slots. You move through the output timeline and swap one exact frame with an image.
 
@@ -30,10 +30,11 @@ The project has two versions:
 - Replace a frame every X output frames from the current timeline position.
 - Export a same-length MP4 with four frames for every original frame.
 - Keep the original audio when possible.
-- Add a second music track.
-- Raise or lower the original soundtrack volume.
-- Raise or lower the added music volume.
-- Detect the key of the original audio and added music, then pitch-shift the added music to match.
+- Open an Audio Editor popup for main audio and added tracks.
+- Add multiple MP3/audio tracks.
+- Set per-track volume, start time, repeat timing, repeat count, speed, masking, and below-main ducking.
+- If the movie has no audio, use the first added track as the main masking track.
+- Detect the key of the original audio or first masking track, then pitch-shift added tracks to match.
 - Color-match replacement images using the previous and next video frames.
 - Blend image detail/frequency from nearby frames so replacements sit better in motion.
 - Android output uses the system folder picker, so you can save to SD card folders when the phone exposes them.
@@ -43,7 +44,7 @@ The project has two versions:
 Download the compiled APK here:
 
 ```text
-https://github.com/sslogic/video-frame-swapper/raw/android-fork/releases/video-frame-swapper-debug.apk
+releases/mayniak-subliminal-multimedia-studio.apk
 ```
 
 Install on Android:
@@ -51,14 +52,14 @@ Install on Android:
 1. Download the APK on the phone.
 2. Open the downloaded file.
 3. If Android blocks it, allow installs from that browser or file manager.
-4. Install `Video Frame Swapper`.
+4. Install `Mayniak Subliminal Multimedia Studio`.
 5. Open the app.
 
 The source for this Android build is in the `android/` folder on this branch.
 ## Get The Code
 
 ```powershell
-git clone https://github.com/sslogic/video-frame-swapper.git
+git clone <repository-url>
 cd video-frame-swapper
 ```
 
@@ -112,7 +113,7 @@ Requirements:
 On this machine, the SDK was found at:
 
 ```text
-E:\androidsdk
+<your Android SDK folder>
 ```
 
 Open the Android project:
@@ -129,11 +130,7 @@ video-frame-swapper\android
 5. If Android Studio asks for an SDK location, use your Android SDK folder.
 6. Build with `Build > Build Bundle(s) / APK(s) > Build APK(s)`.
 
-The debug APK will be created at:
-
-```text
-android\app\build\outputs\apk\debug\app-debug.apk
-```
+The Gradle build writes the local APK under the app build output folder.
 
 ## Android Command-Line Build
 
@@ -147,8 +144,8 @@ gradle :app:assembleDebug
 If you are building on the original development machine from this folder, this command works:
 
 ```powershell
-cd "E:\movie cutter\android"
-$env:JAVA_HOME = "E:\movie cutter\android\jdk17b\jdk-17.0.19+10"
+cd android
+$env:JAVA_HOME = "<your JDK 17 folder>"
 $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
 .\gradle-8.10.2\bin\gradle.bat :app:assembleDebug
 ```
@@ -167,11 +164,13 @@ The local JDK and Gradle download folders are ignored by git. They are not part 
 8. Tap `Replace Every X` to use one image every chosen number of output frames from the current timeline position.
 9. Turn color blending on or off.
 10. Set `Color Blend Strength` and `Image Frequency Blend`.
-11. Tap `Add Music` if you want an extra track.
-12. Set `Original Soundtrack Volume` and `Added Music Volume`.
-13. Leave key matching enabled if you want the added music pitch-shifted to match the original audio.
-14. Tap `Save Folder` and choose where the MP4 should be written.
-15. Tap `Export To Chosen Folder`.
+11. Tap `Audio Editor` to add sound.
+12. Tap `Add Audio Track` and choose an MP3 or other audio file.
+13. Edit each track's volume, movie start time, repeat timing, repeat count, speed, masking, and below-main ducking.
+14. If the video has no audio, turn on `If movie has no audio, use first added track as main masking track`.
+15. Leave key matching enabled if you want added tracks pitch-shifted to match the main audio.
+16. Tap `Save Folder` and choose where the MP4 should be written.
+17. Tap `Export To Chosen Folder`.
 
 The Android app saves the current project locally. When you open the app again it restores the last video, music track, save folder, swapped frames, edited text frames, and slider settings when Android still has access to those files.
 

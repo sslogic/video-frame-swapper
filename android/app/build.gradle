@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace "com.sslogic.videoframeswapper"
+    namespace "com.mayniak.subliminalstudio"
     compileSdk 36
 
     defaultConfig {
-        applicationId "com.sslogic.videoframeswapper"
+        applicationId "com.mayniak.subliminalstudio"
         minSdk 29
         targetSdk 36
         versionCode 1

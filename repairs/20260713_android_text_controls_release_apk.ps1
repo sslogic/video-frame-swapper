@@ -6,7 +6,7 @@ $Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $Readme = Join-Path $Root "README.md"
 $ReleaseNotes = Join-Path $Root "ANDROID_RELEASE.md"
 $BuiltApk = Join-Path $Root "android\app\build\outputs\apk\debug\app-debug.apk"
-$ReleaseApk = Join-Path $Root "releases\video-frame-swapper-debug.apk"
+$ReleaseApk = Join-Path $Root "releases\mayniak-subliminal-multimedia-studio.apk"
 
 New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null
 foreach ($Path in @($Readme, $ReleaseNotes, $ReleaseApk)) {
