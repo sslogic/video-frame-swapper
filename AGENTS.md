@@ -18,6 +18,7 @@
 # Work Guidance
 
 - The desktop editor runs from `run_editor.bat` with the local `.venv`.
+- The desktop editor supports multiple independent windows through the `New Window` button.
 - Use the bundled `imageio-ffmpeg` executable for desktop export behavior.
 - Desktop export streams raw frames directly into FFmpeg, tests GPU H.264 encoders first, and falls back to CPU `libx264`.
 - Exclude generated dependencies, build outputs, local JDK/Gradle distributions, backups, and media artifacts from source-structure decisions.

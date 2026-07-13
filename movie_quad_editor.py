@@ -3,6 +3,7 @@ import os
 import random
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 from dataclasses import dataclass, field
@@ -315,7 +316,7 @@ class MovieQuadEditor(tk.Tk):
 
         topbar = ttk.Frame(self, padding=(10, 10, 10, 6))
         topbar.grid(row=0, column=0, sticky="ew")
-        topbar.columnconfigure(7, weight=1)
+        topbar.columnconfigure(8, weight=1)
 
         self.open_button = ttk.Button(topbar, text="Open Video", command=self.open_video)
         self.open_button.grid(row=0, column=0, padx=(0, 8))
@@ -329,9 +330,11 @@ class MovieQuadEditor(tk.Tk):
         self.export_button.grid(row=0, column=4, padx=(0, 12))
         self.play_button = ttk.Button(topbar, text="Play Preview", command=self.toggle_playback)
         self.play_button.grid(row=0, column=5, padx=(0, 12))
+        self.new_window_button = ttk.Button(topbar, text="New Window", command=self.launch_new_instance)
+        self.new_window_button.grid(row=0, column=6, padx=(0, 12))
 
         self.video_label = ttk.Label(topbar, text="No video loaded")
-        self.video_label.grid(row=0, column=6, columnspan=2, sticky="w")
+        self.video_label.grid(row=0, column=7, columnspan=2, sticky="w")
 
         main = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         main.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
@@ -537,6 +540,18 @@ class MovieQuadEditor(tk.Tk):
                 child.configure(state=state)
             except tk.TclError:
                 pass
+
+    def launch_new_instance(self):
+        try:
+            subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve())],
+                cwd=str(APP_DIR),
+                close_fds=True,
+                creationflags=high_priority_subprocess_flags(),
+            )
+            self.status_var.set("Opened another editor window.")
+        except Exception as exc:
+            messagebox.showerror("New Window", f"Could not open another editor window:\n{exc}")
 
     def open_video(self):
         path = filedialog.askopenfilename(
