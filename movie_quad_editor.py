@@ -1,4 +1,5 @@
 import json
+import os
 import random
 import shutil
 import subprocess
@@ -12,7 +13,7 @@ import tkinter as tk
 import cv2
 import imageio_ffmpeg
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageTk
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageTk
 
 
 SLOT_COUNT = 4
@@ -27,6 +28,36 @@ ANALYSIS_SAMPLE_RATE = 22050
 ANALYSIS_SECONDS = 90
 APP_DIR = Path(__file__).resolve().parent
 RECENT_PROJECTS_PATH = APP_DIR / "recent_projects.json"
+SOURCE_FRAME_CACHE_LIMIT_BYTES = 2 * 1024 * 1024 * 1024
+
+
+def best_effort_raise_process_priority():
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        priority = getattr(subprocess, "ABOVE_NORMAL_PRIORITY_CLASS", 0) or getattr(subprocess, "HIGH_PRIORITY_CLASS", 0)
+        if priority:
+            ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), priority)
+    except Exception:
+        pass
+
+
+def high_priority_subprocess_flags():
+    if os.name != "nt":
+        return 0
+    return getattr(subprocess, "ABOVE_NORMAL_PRIORITY_CLASS", 0)
+
+
+def encoder_options(encoder):
+    if encoder == "h264_nvenc":
+        return ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "21", "-pix_fmt", "yuv420p"]
+    if encoder == "h264_qsv":
+        return ["-c:v", "h264_qsv", "-global_quality", "23", "-pix_fmt", "nv12"]
+    if encoder == "h264_amf":
+        return ["-c:v", "h264_amf", "-quality", "balanced", "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
 
 
 class FixedValue:
@@ -253,6 +284,7 @@ class MovieQuadEditor(tk.Tk):
         self.capture = None
         self.preview_photo = None
         self.exporting = False
+        self.replacing_frames = False
         self.playing = False
         self.play_after_id = None
         self.video_controls = []
@@ -261,6 +293,8 @@ class MovieQuadEditor(tk.Tk):
         self.repeat_image_path = None
         self.repeat_editor_template = None
         self.editor_state = None
+        self.source_frame_cache = None
+        self.source_frame_cache_key = None
         self.recent_projects = load_recent_projects()
         self.music_volume_var = tk.DoubleVar(value=50.0)
         self.source_volume_var = tk.DoubleVar(value=100.0)
@@ -369,7 +403,7 @@ class MovieQuadEditor(tk.Tk):
         edit_row.columnconfigure(4, weight=1)
         self.import_button = ttk.Button(edit_row, text="Import Image", command=self.import_image)
         self.import_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self.edit_image_button = ttk.Button(edit_row, text="Edit Imported", command=self.open_import_editor)
+        self.edit_image_button = ttk.Button(edit_row, text="Edit Frame/Image", command=self.open_import_editor)
         self.edit_image_button.grid(row=0, column=1, sticky="ew", padx=(0, 6))
         self.replace_button = ttk.Button(edit_row, text="Replace Frame", command=self.replace_frame)
         self.replace_button.grid(row=0, column=2, sticky="ew", padx=(0, 6))
@@ -537,6 +571,8 @@ class MovieQuadEditor(tk.Tk):
         video_path = Path(path)
         edit_path = video_path.with_suffix(video_path.suffix + ".quad_edits.json")
         self.state = VideoState(video_path, edit_path, fps, frame_count, width, height)
+        self.source_frame_cache = None
+        self.source_frame_cache_key = None
 
         self.video_label.configure(text=str(video_path))
         self.frame_slider.configure(to=max(0, self.state.output_frame_count - 1))
@@ -565,6 +601,8 @@ class MovieQuadEditor(tk.Tk):
         video_path = Path(path)
         edit_path = video_path.with_suffix(video_path.suffix + ".quad_edits.json")
         self.state = VideoState(video_path, edit_path, fps, frame_count, width, height)
+        self.source_frame_cache = None
+        self.source_frame_cache_key = None
         self.video_label.configure(text=str(video_path))
         self.frame_slider.configure(to=max(0, self.state.output_frame_count - 1))
         self._set_controls_enabled(True)
@@ -737,24 +775,91 @@ class MovieQuadEditor(tk.Tk):
         source_frame = self.state.source_frame_for_output(output_frame)
         override = self.state.frame_override(output_frame)
         if override and Path(override).exists():
-            return self.make_replacement_frame(source_frame, override)
+            return self.make_replacement_frame(output_frame, override)
         return self.read_frame(source_frame)
 
-    def read_frame_from_video(self, frame_index):
+    def source_frame_cache_bytes(self, frame_count):
+        if not self.state:
+            return 0
+        return int(self.state.width) * int(self.state.height) * 3 * int(frame_count)
+
+    def preload_source_frames(self, frame_indices, label):
+        if not self.state:
+            return None
+        unique_indices = sorted({clamp(int(frame_index), 0, self.state.frame_count - 1) for frame_index in frame_indices})
+        if not unique_indices:
+            return {}
+        estimated_bytes = self.source_frame_cache_bytes(len(unique_indices))
+        if estimated_bytes > SOURCE_FRAME_CACHE_LIMIT_BYTES:
+            estimated_gb = estimated_bytes / (1024 ** 3)
+            limit_gb = SOURCE_FRAME_CACHE_LIMIT_BYTES / (1024 ** 3)
+            self.after(
+                0,
+                self.status_var.set,
+                f"{label}: {estimated_gb:.1f} GB decoded, above {limit_gb:.1f} GB RAM cache limit. Streaming instead...",
+            )
+            return None
+
+        self.after(0, self.status_var.set, f"{label}: loading {len(unique_indices)} source frames into memory...")
+        cache = {}
         cap = cv2.VideoCapture(str(self.state.video_path))
+        current_source_frame = None
+        try:
+            for offset, frame_index in enumerate(unique_indices):
+                if current_source_frame is not None and frame_index == current_source_frame + 1:
+                    ok, frame = cap.read()
+                else:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+                    ok, frame = cap.read()
+                if ok:
+                    cache[frame_index] = frame
+                    current_source_frame = frame_index
+                if offset % 50 == 0:
+                    self.after(0, self.status_var.set, f"{label}: loaded {offset + 1} of {len(unique_indices)} frames into memory...")
+        finally:
+            cap.release()
+        self.after(0, self.status_var.set, f"{label}: using {len(cache)} cached source frames from memory...")
+        return cache
+
+    def frame_from_cache_or_video(self, frame_index, frame_cache=None, cap=None):
+        frame_index = clamp(int(frame_index), 0, self.state.frame_count - 1)
+        if frame_cache is not None and frame_index in frame_cache:
+            return frame_cache[frame_index]
+        return self.read_frame_from_video(frame_index, cap)
+
+    def read_frame_from_video(self, frame_index, cap=None):
+        own_capture = cap is None
+        cap = cap or cv2.VideoCapture(str(self.state.video_path))
         try:
             cap.set(cv2.CAP_PROP_POS_FRAMES, clamp(frame_index, 0, self.state.frame_count - 1))
             ok, frame = cap.read()
             return frame if ok else None
         finally:
-            cap.release()
+            if own_capture:
+                cap.release()
 
-    def make_replacement_frame(self, frame_index, override_path):
-        replacement = image_to_bgr(override_path, (self.state.width, self.state.height))
+    def preload_replacement_images(self):
+        cache = {}
+        for override in sorted({str(path) for path in self.state.edits.values()}):
+            path = Path(override)
+            if path.exists():
+                cache[str(path)] = image_to_bgr(path, (self.state.width, self.state.height))
+        if cache:
+            self.after(0, self.status_var.set, f"Cached {len(cache)} replacement images for export...")
+        return cache
+
+    def make_replacement_frame(self, output_frame, override_path, frame_reader=None, replacement_cache=None):
+        path_key = str(Path(override_path))
+        replacement = replacement_cache.get(path_key) if replacement_cache is not None else None
+        if replacement is None:
+            replacement = image_to_bgr(override_path, (self.state.width, self.state.height))
         if not self.state.frame_color_blend:
             return replacement
-        previous_frame = self.read_frame_from_video(max(0, frame_index - 1))
-        next_frame = self.read_frame_from_video(min(self.state.frame_count - 1, frame_index + 1))
+        frame_reader = frame_reader or self.read_frame_from_video
+        previous_output = max(0, output_frame - 1)
+        next_output = min(self.state.output_frame_count - 1, output_frame + 1)
+        previous_frame = frame_reader(self.state.source_frame_for_output(previous_output))
+        next_frame = frame_reader(self.state.source_frame_for_output(next_output))
         return blend_replacement_frame(
             replacement,
             previous_frame,
@@ -1079,7 +1184,7 @@ class MovieQuadEditor(tk.Tk):
         self.status_var.set("Frame replaced. Click Save Edits to keep this change.")
 
     def replace_every_x_frames(self):
-        if not self.state:
+        if not self.state or self.exporting or self.replacing_frames:
             return
         if self.repeat_image_path and self.repeat_image_path.exists():
             path = self.repeat_image_path
@@ -1112,23 +1217,72 @@ class MovieQuadEditor(tk.Tk):
         )
         if not interval:
             return
+
         start_frame = self.state.current_output_frame
+        template = self.repeat_editor_template
+        path = Path(path)
+        total = len(range(start_frame, self.state.output_frame_count, interval))
+        self.replacing_frames = True
+        self.stop_playback()
+        self.open_button.configure(state=tk.DISABLED)
+        self._set_controls_enabled(False)
+        self.progress.configure(value=0, maximum=max(1, total))
+        self.status_var.set(f"Replacing {total} frames every {interval} output frames...")
+        thread = threading.Thread(
+            target=self._replace_every_x_worker,
+            args=(start_frame, interval, path, template, total),
+            daemon=True,
+        )
+        thread.start()
+
+    def _replace_every_x_worker(self, start_frame, interval, path, template, total):
+        best_effort_raise_process_priority()
+        edits = {}
         count = 0
-        if self.repeat_editor_template:
-            edit_dir = self.state.video_path.with_suffix("").parent / ".frame_edits"
-            edit_dir.mkdir(exist_ok=True)
-            for output_frame in range(start_frame, self.state.output_frame_count, interval):
-                output = edit_dir / f"{self.state.video_path.stem}_frame_{output_frame}.png"
-                custom_image = self.compose_editor_template_image(self.repeat_editor_template, output_frame)
-                if custom_image is None:
-                    continue
-                custom_image.convert("RGB").save(output)
-                self.state.edits[str(output_frame)] = str(output)
-                count += 1
-        else:
-            for output_frame in range(start_frame, self.state.output_frame_count, interval):
-                self.state.edits[str(output_frame)] = str(path)
-                count += 1
+        cap = None
+        try:
+            if template:
+                edit_dir = self.state.video_path.with_suffix("").parent / ".frame_edits"
+                edit_dir.mkdir(exist_ok=True)
+                output_frames = list(range(start_frame, self.state.output_frame_count, interval))
+                frame_cache = self.preload_source_frames(
+                    (self.state.source_frame_for_output(output_frame) for output_frame in output_frames),
+                    "Replace Every X",
+                )
+                cap = cv2.VideoCapture(str(self.state.video_path))
+                for index, output_frame in enumerate(output_frames):
+                    output = edit_dir / f"{self.state.video_path.stem}_frame_{output_frame}.png"
+                    custom_image = self.compose_editor_template_image(template, output_frame, cap, frame_cache)
+                    if custom_image is not None:
+                        custom_image.convert("RGB").save(output)
+                        edits[str(output_frame)] = str(output)
+                        count += 1
+                    if index % 10 == 0:
+                        self.after(0, self.progress.configure, {"value": index + 1})
+                        self.after(0, self.status_var.set, f"Replacing frame {index + 1} of {total}...")
+            else:
+                for index, output_frame in enumerate(range(start_frame, self.state.output_frame_count, interval)):
+                    edits[str(output_frame)] = str(path)
+                    count += 1
+                    if index % 500 == 0:
+                        self.after(0, self.progress.configure, {"value": index + 1})
+            self.after(0, self._replace_every_x_done, start_frame, interval, edits, count, None)
+        except Exception as exc:
+            self.after(0, self._replace_every_x_done, start_frame, interval, edits, count, exc)
+        finally:
+            if cap is not None:
+                cap.release()
+
+    def _replace_every_x_done(self, start_frame, interval, edits, count, error):
+        self.replacing_frames = False
+        self.open_button.configure(state=tk.NORMAL)
+        self._set_controls_enabled(True)
+        self.progress.configure(value=0)
+        if error:
+            self.status_var.set("Replace Every X failed.")
+            messagebox.showerror("Replace Every X", str(error))
+            return
+        self.state.edits.update(edits)
         self.show_current_frame()
         self.status_var.set(
             f"Replaced {count} frames every {interval} output frames starting at frame {start_frame}. Click Save Edits to keep this change."
@@ -1171,26 +1325,31 @@ class MovieQuadEditor(tk.Tk):
         layer.paste(image, ((frame_width - fitted_width) // 2, (frame_height - fitted_height) // 2), image)
         return layer
 
-    def open_import_editor(self):
+    def open_import_editor(self, initial_tool="brush", seed_text=False):
         if not self.state:
             return
-        if self.imported_image is None:
-            self.import_image()
-            if self.imported_image is None:
-                return
 
         editor_output_frame = self.state.current_output_frame
         original_frame = self.read_frame(self.state.source_frame_for_output(editor_output_frame))
         if original_frame is None:
-            messagebox.showerror("Edit Imported", "Could not read the frame being replaced.")
+            messagebox.showerror("Edit Frame", "Could not read the frame being edited.")
             return
 
         original = Image.fromarray(cv2.cvtColor(original_frame, cv2.COLOR_BGR2RGB)).convert("RGBA")
-        imported_source = self.imported_image.copy().convert("RGBA")
-        imported = self.fit_image_to_frame(imported_source, original.size)
+        direct_frame_edit = self.imported_image is None
+        if direct_frame_edit:
+            imported_source = Image.new("RGBA", original.size, (0, 0, 0, 0))
+            imported = imported_source.copy()
+            frame_opacity = 100.0
+            image_opacity = 0.0
+        else:
+            imported_source = self.imported_image.copy().convert("RGBA")
+            imported = self.fit_image_to_frame(imported_source, original.size)
+            frame_opacity = 35.0
+            image_opacity = 100.0
 
         window = tk.Toplevel(self)
-        window.title("Edit Imported Image")
+        window.title("Edit Frame" if direct_frame_edit else "Edit Imported Image")
         window.geometry("1180x760")
         window.minsize(980, 640)
         window.columnconfigure(0, weight=1)
@@ -1228,7 +1387,7 @@ class MovieQuadEditor(tk.Tk):
         panel.bind("<Enter>", lambda _event: panel_canvas.bind_all("<MouseWheel>", scroll_panel))
         panel.bind("<Leave>", lambda _event: panel_canvas.unbind_all("<MouseWheel>"))
 
-        tool_var = tk.StringVar(value="brush")
+        tool_var = tk.StringVar(value=initial_tool)
         text_var = tk.StringVar(value="Text")
         brush_color = {"value": "#ffffff"}
         text_color = {"value": "#ffffff"}
@@ -1241,6 +1400,7 @@ class MovieQuadEditor(tk.Tk):
             "imported_source": imported_source,
             "imported_content": imported_source.copy(),
             "imported": imported,
+            "direct_frame_edit": direct_frame_edit,
             "background_image": None,
             "draw_layer": Image.new("RGBA", original.size, (0, 0, 0, 0)),
             "text_objects": [],
@@ -1254,8 +1414,8 @@ class MovieQuadEditor(tk.Tk):
             "photo": None,
             "preview_scale": 1.0,
             "preview_offset": (0, 0),
-            "frame_opacity": tk.DoubleVar(value=35.0),
-            "image_opacity": tk.DoubleVar(value=100.0),
+            "frame_opacity": tk.DoubleVar(value=frame_opacity),
+            "image_opacity": tk.DoubleVar(value=image_opacity),
             "image_size": tk.DoubleVar(value=100.0),
             "image_rotation": tk.DoubleVar(value=0.0),
             "background_remove_tolerance": tk.DoubleVar(value=38.0),
@@ -1279,11 +1439,11 @@ class MovieQuadEditor(tk.Tk):
         ttk.Label(panel, text="Layer Opacity").grid(row=0, column=0, sticky="w")
         ttk.Label(panel, text="Original frame").grid(row=1, column=0, sticky="w")
         ttk.Scale(panel, from_=0, to=100, variable=state["frame_opacity"], command=self.on_editor_layer_control_changed).grid(row=2, column=0, sticky="ew")
-        ttk.Label(panel, text="Imported image").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(panel, text="Image layer").grid(row=3, column=0, sticky="w", pady=(8, 0))
         ttk.Scale(panel, from_=0, to=100, variable=state["image_opacity"], command=self.on_editor_layer_control_changed).grid(row=4, column=0, sticky="ew")
-        ttk.Label(panel, text="Imported image size").grid(row=5, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(panel, text="Image layer size").grid(row=5, column=0, sticky="w", pady=(8, 0))
         ttk.Scale(panel, from_=5, to=300, variable=state["image_size"], command=self.on_imported_image_size_changed).grid(row=6, column=0, sticky="ew")
-        ttk.Label(panel, text="Imported image rotation").grid(row=7, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(panel, text="Image layer rotation").grid(row=7, column=0, sticky="w", pady=(8, 0))
         ttk.Scale(panel, from_=-180, to=180, variable=state["image_rotation"], command=self.on_editor_layer_control_changed).grid(row=8, column=0, sticky="ew")
 
         ttk.Separator(panel).grid(row=9, column=0, sticky="ew", pady=10)
@@ -1527,6 +1687,7 @@ class MovieQuadEditor(tk.Tk):
             tile = Image.new("RGBA", mask.size, fill)
             tile.putalpha(mask)
             return tile
+
         base = self.compose_editor_base(include_draw_layer=True).convert("RGB")
         width, height = base.size
         tile_width, tile_height = mask.size
@@ -1542,24 +1703,28 @@ class MovieQuadEditor(tk.Tk):
         pattern = Image.new("RGB", mask.size, fill[:3])
         crop = base.crop((x1, y1, x2, y2))
         pattern.paste(crop, (x1 - x, y1 - y))
+        pattern = pattern.filter(ImageFilter.GaussianBlur(radius=max(2, min(mask.size) // 18)))
 
-        pattern_pixels = np.array(pattern, dtype=np.float32)
         mask_pixels = np.array(mask, dtype=np.float32)
+        pattern_pixels = np.array(pattern, dtype=np.float32)
         visible = mask_pixels > 0
         if np.any(visible):
-            average = pattern_pixels[visible].mean(axis=0)
-            luminance = float(np.dot(average, [0.2126, 0.7152, 0.0722]))
-            shift = 44.0 if luminance < 128 else -44.0
-            pattern_pixels = np.clip(pattern_pixels + shift, 0, 255)
+            ys, xs = np.nonzero(visible)
+            sample_colors = []
+            for dx, dy in ((0, 0), (-6, 0), (6, 0), (0, -6), (0, 6), (-10, -10), (10, -10), (-10, 10), (10, 10)):
+                sx = np.clip(xs + dx, 0, tile_width - 1)
+                sy = np.clip(ys + dy, 0, tile_height - 1)
+                sample_colors.append(pattern_pixels[sy, sx])
+            local_average = np.mean(sample_colors, axis=0)
+            pattern_pixels[ys, xs] = local_average
 
         fill_pixels = np.zeros_like(pattern_pixels)
         fill_pixels[:, :] = fill[:3]
         blended = fill_pixels * (1.0 - camouflage) + pattern_pixels * camouflage
         alpha = np.clip(mask_pixels * (fill[3] / 255.0), 0, 255).astype(np.uint8)
-        result = Image.fromarray(blended.astype(np.uint8), "RGB").convert("RGBA")
+        result = Image.fromarray(np.clip(blended, 0, 255).astype(np.uint8), "RGB").convert("RGBA")
         result.putalpha(Image.fromarray(alpha, "L"))
         return result
-
     def find_text_at(self, point):
         state = self.editor_state
         if not state:
@@ -1773,51 +1938,74 @@ class MovieQuadEditor(tk.Tk):
         width, height = state["imported"].size
         x = clamp(point[0], 0, width - 1)
         y = clamp(point[1], 0, height - 1)
-        self.push_editor_undo()
         image = state["imported"].copy().convert("RGBA")
         pixels = np.array(image)
+        if pixels[y, x, 3] == 0:
+            messagebox.showinfo("Remove BG Click", "Click on the visible background color inside the imported image.")
+            return
+        self.push_editor_undo()
         target = pixels[y, x, :3].astype(np.int16)
         rgb = pixels[:, :, :3].astype(np.int16)
         distance = np.linalg.norm(rgb - target, axis=2)
         tolerance = state["background_remove_tolerance"].get()
-        mask = self.connected_background_mask(distance <= tolerance, x, y)
-        alpha = pixels[:, :, 3]
+        candidate = (distance <= tolerance) & (pixels[:, :, 3] > 0)
+        mask = self.connected_background_mask(candidate, x, y)
+        if not np.any(mask):
+            self.refresh_editor_preview()
+            return
+        alpha = pixels[:, :, 3].copy()
         alpha[mask] = 0
+        feather = (distance <= tolerance * 1.35) & (pixels[:, :, 3] > 0) & ~mask
+        alpha[feather] = np.minimum(alpha[feather], 120)
         pixels[:, :, 3] = alpha
         state["imported"] = Image.fromarray(pixels)
         state["imported_content"] = self.visible_image_content(state["imported"])
-        state["image_size"].set(self.current_content_scale_percent(state["imported_content"], state["original"].size))
-        state["imported"] = self.fit_image_to_frame(state["imported_content"].copy(), state["original"].size, state["image_size"].get())
         self.refresh_editor_preview()
 
     def auto_remove_imported_background(self):
         state = self.editor_state
         if not state:
             return
-        self.push_editor_undo()
         image = state["imported"].copy().convert("RGBA")
         pixels = np.array(image)
         height, width = pixels.shape[:2]
+        alpha = pixels[:, :, 3]
+        visible = alpha > 0
+        if not np.any(visible):
+            return
+        self.push_editor_undo()
         rgb = pixels[:, :, :3].astype(np.int16)
-        samples = np.concatenate((rgb[0, :, :], rgb[-1, :, :], rgb[:, 0, :], rgb[:, -1, :]), axis=0)
+        edge_visible = np.zeros((height, width), dtype=bool)
+        edge_visible[0, :] = visible[0, :]
+        edge_visible[-1, :] = visible[-1, :]
+        edge_visible[:, 0] = visible[:, 0]
+        edge_visible[:, -1] = visible[:, -1]
+        if np.any(edge_visible):
+            samples = rgb[edge_visible]
+        else:
+            ys, xs = np.nonzero(visible)
+            min_x, max_x = xs.min(), xs.max()
+            min_y, max_y = ys.min(), ys.max()
+            border = np.zeros((height, width), dtype=bool)
+            border[min_y, min_x:max_x + 1] = True
+            border[max_y, min_x:max_x + 1] = True
+            border[min_y:max_y + 1, min_x] = True
+            border[min_y:max_y + 1, max_x] = True
+            samples = rgb[border & visible]
         target = np.median(samples, axis=0)
         distance = np.linalg.norm(rgb - target, axis=2)
         tolerance = state["background_remove_tolerance"].get()
-        edge_mask = np.zeros((height, width), dtype=bool)
-        edge_mask[0, :] = distance[0, :] <= tolerance
-        edge_mask[-1, :] = distance[-1, :] <= tolerance
-        edge_mask[:, 0] = distance[:, 0] <= tolerance
-        edge_mask[:, -1] = distance[:, -1] <= tolerance
-        mask = self.connected_background_mask(distance <= tolerance, None, None, edge_mask)
-        alpha = pixels[:, :, 3]
+        candidate = (distance <= tolerance) & visible
+        seed_mask = edge_visible & candidate
+        if not np.any(seed_mask):
+            seed_mask = candidate
+        mask = self.connected_background_mask(candidate, None, None, seed_mask)
+        alpha = alpha.copy()
         alpha[mask] = 0
         pixels[:, :, 3] = alpha
         state["imported"] = Image.fromarray(pixels)
         state["imported_content"] = self.visible_image_content(state["imported"])
-        state["image_size"].set(self.current_content_scale_percent(state["imported_content"], state["original"].size))
-        state["imported"] = self.fit_image_to_frame(state["imported_content"].copy(), state["original"].size, state["image_size"].get())
         self.refresh_editor_preview()
-
     def connected_background_mask(self, candidate_mask, start_x=None, start_y=None, seed_mask=None):
         height, width = candidate_mask.shape
         visited = np.zeros((height, width), dtype=bool)
@@ -1869,9 +2057,6 @@ class MovieQuadEditor(tk.Tk):
             if selected:
                 state["selected_text"] = selected
                 self.sync_text_controls_from_selected()
-            elif state.get("selected_text"):
-                self.push_editor_undo()
-                state["selected_text"]["x"], state["selected_text"]["y"] = point
             else:
                 self.push_editor_undo()
                 selected = {
@@ -1924,7 +2109,7 @@ class MovieQuadEditor(tk.Tk):
             return
         if state["tool_var"].get() == "text":
             selected = state.get("selected_text")
-            if selected:
+            if selected and self.find_text_at(point) is selected:
                 if not state["text_drag_undo_active"]:
                     self.push_editor_undo()
                     state["text_drag_undo_active"] = True
@@ -1979,7 +2164,7 @@ class MovieQuadEditor(tk.Tk):
     def close_import_editor(self):
         if not self.editor_state:
             return
-        answer = messagebox.askyesnocancel("Edit Imported Image", "Apply these changes to the selected video frame before closing?")
+        answer = messagebox.askyesnocancel("Edit Frame", "Apply these changes to the selected video frame before closing?")
         if answer is None:
             return
         if answer:
@@ -2018,9 +2203,9 @@ class MovieQuadEditor(tk.Tk):
             "image_rotation": state["image_rotation"].get(),
         }
 
-    def compose_editor_template_image(self, template, output_frame):
+    def compose_editor_template_image(self, template, output_frame, cap=None, frame_cache=None):
         source_frame = self.state.source_frame_for_output(output_frame)
-        frame = self.read_frame_from_video(source_frame)
+        frame = self.frame_from_cache_or_video(source_frame, frame_cache, cap)
         if frame is None:
             return None
         original = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).convert("RGBA")
@@ -2137,67 +2322,174 @@ class MovieQuadEditor(tk.Tk):
         thread = threading.Thread(target=self._export_worker, args=(Path(output),), daemon=True)
         thread.start()
 
-    def _export_worker(self, output_path):
-        temp_dir = Path(tempfile.mkdtemp(prefix="quad_editor_"))
-        silent_path = temp_dir / "video_no_audio.mp4"
+    def select_video_encoder(self, ffmpeg):
+        for encoder in ("h264_nvenc", "h264_qsv", "h264_amf"):
+            if self.test_video_encoder(ffmpeg, encoder):
+                return encoder
+        return "libx264"
+
+    def test_video_encoder(self, ffmpeg, encoder):
+        cmd = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x64:rate=1",
+            "-frames:v",
+            "1",
+            *encoder_options(encoder),
+            "-f",
+            "null",
+            "-",
+        ]
         try:
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(
-                str(silent_path),
-                fourcc,
-                self.state.export_fps,
-                (self.state.width, self.state.height),
+            subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                creationflags=high_priority_subprocess_flags(),
             )
-            if not writer.isOpened():
-                raise RuntimeError("Could not start MP4 writer.")
+            return True
+        except Exception:
+            return False
+
+    def _export_worker(self, output_path):
+        best_effort_raise_process_priority()
+        cap = None
+        context_cap = None
+        process = None
+        try:
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+            encoder = self.select_video_encoder(ffmpeg)
+            self.after(0, self.status_var.set, f"Exporting with {encoder} encoder...")
+            cmd = self.build_ffmpeg_command(ffmpeg, output_path, encoder)
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
+                creationflags=high_priority_subprocess_flags(),
+            )
+
+            replacement_cache = self.preload_replacement_images()
+            source_cache = None
+            if self.source_frame_cache_bytes(self.state.frame_count) <= SOURCE_FRAME_CACHE_LIMIT_BYTES:
+                source_cache = self.preload_source_frames(range(self.state.frame_count), "Export")
+
+            context_preload = None
+            if source_cache is None and self.state.frame_color_blend:
+                context_indices = []
+                for output_frame_text in self.state.edits:
+                    try:
+                        output_frame = int(output_frame_text)
+                    except ValueError:
+                        continue
+                    previous_output = max(0, output_frame - 1)
+                    next_output = min(self.state.output_frame_count - 1, output_frame + 1)
+                    context_indices.extend(
+                        (
+                            self.state.source_frame_for_output(previous_output),
+                            self.state.source_frame_for_output(next_output),
+                        )
+                    )
+                context_preload = self.preload_source_frames(context_indices, "Export replacements")
 
             cap = cv2.VideoCapture(str(self.state.video_path))
+            context_cap = cv2.VideoCapture(str(self.state.video_path))
+            context_cache = {}
             current_source_frame = None
             frame = None
+
+            def cached_context_frame(frame_index):
+                frame_index = clamp(frame_index, 0, self.state.frame_count - 1)
+                if source_cache is not None and frame_index in source_cache:
+                    return source_cache[frame_index]
+                if context_preload is not None and frame_index in context_preload:
+                    return context_preload[frame_index]
+                cached = context_cache.get(frame_index)
+                if cached is None:
+                    cached = self.read_frame_from_video(frame_index, context_cap)
+                    context_cache[frame_index] = cached
+                    if len(context_cache) > 256:
+                        context_cache.pop(next(iter(context_cache)))
+                return cached
+
             for output_frame in range(self.state.output_frame_count):
                 source_frame = self.state.source_frame_for_output(output_frame)
                 if source_frame != current_source_frame:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, source_frame)
-                    ok, frame = cap.read()
+                    if source_cache is not None and source_frame in source_cache:
+                        frame = source_cache[source_frame]
+                        ok = True
+                    elif current_source_frame is not None and source_frame == current_source_frame + 1:
+                        ok, frame = cap.read()
+                    else:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, source_frame)
+                        ok, frame = cap.read()
                     if not ok:
-                        break
+                        raise RuntimeError(f"Could not read source frame {source_frame} while exporting output frame {output_frame}.")
                     current_source_frame = source_frame
                 override = self.state.frame_override(output_frame)
                 if override and Path(override).exists():
-                    out_frame = self.make_replacement_frame(source_frame, override)
+                    out_frame = self.make_replacement_frame(output_frame, override, cached_context_frame, replacement_cache)
                 else:
                     out_frame = frame
-                writer.write(out_frame)
+                process.stdin.write(np.ascontiguousarray(out_frame).tobytes())
                 if output_frame % 20 == 0:
                     self.after(0, self.progress.configure, {"value": output_frame + 1})
                     self.after(
                         0,
                         self.status_var.set,
-                        f"Exporting frame {output_frame + 1} of {self.state.output_frame_count}...",
+                        f"Exporting frame {output_frame + 1} of {self.state.output_frame_count} with {encoder}...",
                     )
-            cap.release()
-            writer.release()
 
-            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-            cmd = self.build_ffmpeg_command(ffmpeg, silent_path, output_path)
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            process.stdin.close()
+            process.stdin = None
+            stdout, stderr = process.communicate()
+            if process.returncode != 0:
+                error_text = stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else str(stderr)
+                raise RuntimeError(error_text.strip() or f"FFmpeg failed with exit code {process.returncode}.")
             self.after(0, self._export_done, output_path, None)
         except Exception as exc:
             self.after(0, self._export_done, output_path, exc)
         finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def build_ffmpeg_command(self, ffmpeg, silent_path, output_path):
+            if cap is not None:
+                cap.release()
+            if context_cap is not None:
+                context_cap.release()
+            if process is not None and process.stdin:
+                try:
+                    process.stdin.close()
+                except Exception:
+                    pass
+    def build_ffmpeg_command(self, ffmpeg, output_path, encoder):
+        video_input = [
+            ffmpeg,
+            "-y",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-s:v",
+            f"{self.state.width}x{self.state.height}",
+            "-r",
+            f"{self.state.export_fps:.6f}",
+            "-i",
+            "pipe:0",
+        ]
+        video_output = encoder_options(encoder)
         music_path = Path(self.state.music_path) if self.state.music_path else None
         has_music = music_path and music_path.exists()
         if not has_music:
             has_source_audio = self.source_has_audio(ffmpeg, self.state.video_path)
             if has_source_audio and abs(self.state.source_volume - 1.0) > 0.001:
                 return [
-                    ffmpeg,
-                    "-y",
-                    "-i",
-                    str(silent_path),
+                    *video_input,
                     "-i",
                     str(self.state.video_path),
                     "-filter_complex",
@@ -2206,30 +2498,21 @@ class MovieQuadEditor(tk.Tk):
                     "0:v:0",
                     "-map",
                     "[aout]",
-                    "-c:v",
-                    "libx264",
-                    "-pix_fmt",
-                    "yuv420p",
+                    *video_output,
                     "-c:a",
                     "aac",
                     "-shortest",
                     str(output_path),
                 ]
             return [
-                ffmpeg,
-                "-y",
-                "-i",
-                str(silent_path),
+                *video_input,
                 "-i",
                 str(self.state.video_path),
                 "-map",
                 "0:v:0",
                 "-map",
                 "1:a?",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
+                *video_output,
                 "-c:a",
                 "aac",
                 "-shortest",
@@ -2256,10 +2539,7 @@ class MovieQuadEditor(tk.Tk):
 
         if has_source_audio:
             return [
-                ffmpeg,
-                "-y",
-                "-i",
-                str(silent_path),
+                *video_input,
                 "-i",
                 str(self.state.video_path),
                 "-stream_loop",
@@ -2273,10 +2553,7 @@ class MovieQuadEditor(tk.Tk):
                 "0:v:0",
                 "-map",
                 "[aout]",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
+                *video_output,
                 "-c:a",
                 "aac",
                 "-t",
@@ -2285,10 +2562,7 @@ class MovieQuadEditor(tk.Tk):
             ]
 
         return [
-            ffmpeg,
-            "-y",
-            "-i",
-            str(silent_path),
+            *video_input,
             "-stream_loop",
             "-1",
             "-i",
@@ -2299,17 +2573,13 @@ class MovieQuadEditor(tk.Tk):
             "0:v:0",
             "-map",
             "[aout]",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
+            *video_output,
             "-c:a",
             "aac",
             "-t",
             export_duration,
             str(output_path),
         ]
-
     def source_has_audio(self, ffmpeg, media_path):
         result = subprocess.run(
             [ffmpeg, "-hide_banner", "-i", str(media_path)],
@@ -2321,6 +2591,7 @@ class MovieQuadEditor(tk.Tk):
 
     def _export_done(self, output_path, error):
         self.exporting = False
+        self.replacing_frames = False
         self.open_button.configure(state=tk.NORMAL)
         self._set_controls_enabled(True)
         self.progress.configure(value=0)
