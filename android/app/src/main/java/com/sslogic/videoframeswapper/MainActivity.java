@@ -11,11 +11,13 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.ImageDecoder;
 import android.graphics.Paint;
+import android.graphics.RectF;
 import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -45,7 +47,10 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -56,6 +61,7 @@ public class MainActivity extends Activity {
     private static final int PICK_MUSIC = 11;
     private static final int PICK_REPLACEMENT = 12;
     private static final int PICK_OUTPUT_TREE = 13;
+    private static final int PICK_REPEAT_REPLACEMENT = 14;
     private static final String PREFS = "video_frame_swapper_project";
     private static final String PREF_PROJECT = "last_project";
     private static final int SLOT_COUNT = 4;
@@ -89,6 +95,7 @@ public class MainActivity extends Activity {
     private int videoWidth = 1280;
     private int videoHeight = 720;
     private boolean exporting = false;
+    private int pendingRepeatInterval = 0;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -135,8 +142,10 @@ public class MainActivity extends Activity {
         LinearLayout editRow = row();
         Button replace = button("Replace Frame");
         replace.setOnClickListener(v -> pick(PICK_REPLACEMENT, "image/*"));
-        Button editText = button("Edit Text");
-        editText.setOnClickListener(v -> openTextEditor());
+        Button editImage = button("Edit Image/Text");
+        editImage.setOnClickListener(v -> openFrameImageEditor());
+        Button repeatReplace = button("Replace Every X");
+        repeatReplace.setOnClickListener(v -> replaceEveryXFrames());
         Button clear = button("Clear Frame");
         clear.setOnClickListener(v -> {
             replacements.remove(key(currentOutputFrame));
@@ -144,7 +153,8 @@ public class MainActivity extends Activity {
             refreshPreview();
         });
         editRow.addView(replace, weight());
-        editRow.addView(editText, weight());
+        editRow.addView(editImage, weight());
+        editRow.addView(repeatReplace, weight());
         editRow.addView(clear, weight());
         root.addView(editRow);
 
@@ -295,6 +305,8 @@ public class MainActivity extends Activity {
             musicUri = uri;
         } else if (requestCode == PICK_REPLACEMENT) {
             replacements.put(key(currentOutputFrame), uri);
+        } else if (requestCode == PICK_REPEAT_REPLACEMENT) {
+            applyRepeatedReplacement(uri);
         } else if (requestCode == PICK_OUTPUT_TREE) {
             outputTreeUri = uri;
         }
@@ -387,16 +399,31 @@ public class MainActivity extends Activity {
     }
 
     private Bitmap loadBitmap(Uri uri, int width, int height) throws IOException {
+        Bitmap bitmap;
         if ("file".equals(uri.getScheme())) {
-            Bitmap bitmap = BitmapFactory.decodeFile(uri.getPath());
+            bitmap = BitmapFactory.decodeFile(uri.getPath());
             if (bitmap == null) {
                 throw new IOException("Could not read image file.");
             }
-            return Bitmap.createScaledBitmap(bitmap, width, height, true);
+        } else {
+            ImageDecoder.Source source = ImageDecoder.createSource(getContentResolver(), uri);
+            bitmap = ImageDecoder.decodeBitmap(source, (decoder, info, src) -> decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE));
         }
-        ImageDecoder.Source source = ImageDecoder.createSource(getContentResolver(), uri);
-        Bitmap bitmap = ImageDecoder.decodeBitmap(source, (decoder, info, src) -> decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE));
-        return Bitmap.createScaledBitmap(bitmap, width, height, true);
+        return fitBitmapToFrame(bitmap, width, height, 100);
+    }
+
+    private Bitmap fitBitmapToFrame(Bitmap bitmap, int width, int height, int scalePercent) {
+        Bitmap source = bitmap.copy(Bitmap.Config.ARGB_8888, false);
+        double fitScale = Math.min(width / (double) source.getWidth(), height / (double) source.getHeight());
+        double scale = fitScale * Math.max(5, Math.min(300, scalePercent)) / 100.0;
+        int fittedWidth = Math.max(1, (int) Math.round(source.getWidth() * scale));
+        int fittedHeight = Math.max(1, (int) Math.round(source.getHeight() * scale));
+        Bitmap fitted = Bitmap.createScaledBitmap(source, fittedWidth, fittedHeight, true);
+        Bitmap layer = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(layer);
+        canvas.drawColor(Color.TRANSPARENT);
+        canvas.drawBitmap(fitted, (width - fittedWidth) / 2f, (height - fittedHeight) / 2f, null);
+        return layer;
     }
 
     private void saveProject() {
@@ -469,108 +496,488 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void openTextEditor() {
+    private void openFrameImageEditor() {
         if (videoUri == null) {
             setStatus("Open a video first.");
             return;
         }
+        try {
+            MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+            Bitmap source;
+            try {
+                retriever.setDataSource(this, videoUri);
+                source = frameAt(retriever, sourceFrameForOutput(currentOutputFrame)).copy(Bitmap.Config.ARGB_8888, true);
+            } finally {
+                safeRelease(retriever);
+            }
+            Uri replacementUri = replacements.get(key(currentOutputFrame));
+            Bitmap imageLayer = replacementUri == null ? null : loadBitmap(replacementUri, videoWidth, videoHeight).copy(Bitmap.Config.ARGB_8888, true);
+            showImageEditorDialog(source, imageLayer);
+        } catch (Exception exc) {
+            setStatus("Image editor failed: " + exc.getMessage());
+        }
+    }
+
+    private void showImageEditorDialog(Bitmap sourceFrame, Bitmap initialLayer) {
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
-        layout.setPadding(28, 16, 28, 0);
+        layout.setPadding(18, 12, 18, 0);
+
+        ImageView preview = new ImageView(this);
+        preview.setBackgroundColor(Color.rgb(24, 24, 24));
+        preview.setScaleType(ImageView.ScaleType.FIT_XY);
+        layout.addView(preview, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 620));
+
+        RadioGroup mode = new RadioGroup(this);
+        mode.setOrientation(RadioGroup.HORIZONTAL);
+        RadioButton textMode = new RadioButton(this);
+        textMode.setText("Text");
+        textMode.setId(1);
+        RadioButton removeMode = new RadioButton(this);
+        removeMode.setText("Remove BG");
+        removeMode.setId(2);
+        mode.addView(textMode);
+        mode.addView(removeMode);
+        mode.check(1);
+        layout.addView(mode, matchWrap());
 
         EditText textInput = new EditText(this);
         textInput.setHint("Text");
         textInput.setText("Text");
         layout.addView(textInput, matchWrap());
 
-        TextView sizeLabel = label("Text Size");
-        layout.addView(sizeLabel);
-        SeekBar sizeSeek = new SeekBar(this);
-        sizeSeek.setMax(300);
-        sizeSeek.setProgress(64);
-        layout.addView(sizeSeek, matchWrap());
+        SeekBar sizeSeek = seek(layout, "Text Size", 8, 300, 64);
+        SeekBar rotationSeek = seek(layout, "Text Rotation", 0, 360, 0);
+        SeekBar opacitySeek = seek(layout, "Text Opacity", 0, 100, 100);
+        SeekBar camouflageSeek = seek(layout, "Text Camouflage", 0, 100, 0);
+        CheckBox borderCheck = new CheckBox(this);
+        borderCheck.setText("Text border");
+        layout.addView(borderCheck, matchWrap());
+        SeekBar imageSizeSeek = seek(layout, "Image Size", 5, 300, 100);
+        SeekBar imageRotationSeek = seek(layout, "Image Rotation", 0, 360, 0);
+        SeekBar bgToleranceSeek = seek(layout, "BG Remove Tolerance", 5, 140, 38);
 
-        TextView rotateLabel = label("Rotation");
-        layout.addView(rotateLabel);
-        SeekBar rotationSeek = new SeekBar(this);
-        rotationSeek.setMax(360);
-        rotationSeek.setProgress(0);
-        layout.addView(rotationSeek, matchWrap());
+        Button autoRemove = button("Auto Remove Image BG");
+        layout.addView(autoRemove, matchWrap());
 
-        TextView xLabel = label("X Position");
-        layout.addView(xLabel);
-        SeekBar xSeek = new SeekBar(this);
-        xSeek.setMax(1000);
-        xSeek.setProgress(500);
-        layout.addView(xSeek, matchWrap());
+        LinearLayout textActions = row();
+        Button duplicateText = button("Duplicate Text");
+        Button deleteText = button("Delete Text");
+        textActions.addView(duplicateText, weight());
+        textActions.addView(deleteText, weight());
+        layout.addView(textActions);
 
-        TextView yLabel = label("Y Position");
-        layout.addView(yLabel);
-        SeekBar ySeek = new SeekBar(this);
-        ySeek.setMax(1000);
-        ySeek.setProgress(500);
-        layout.addView(ySeek, matchWrap());
+        final Bitmap[] imageLayer = new Bitmap[]{initialLayer};
+        final List<TextOverlay> texts = new ArrayList<>();
+        final TextOverlay[] selected = new TextOverlay[]{null};
+        final boolean[] dragSelected = new boolean[]{false};
 
+        Runnable syncTextControls = () -> {
+            TextOverlay active = selected[0];
+            if (active == null) {
+                return;
+            }
+            if (!textInput.getText().toString().equals(active.text)) {
+                textInput.setText(active.text);
+            }
+            setSeekValue(sizeSeek, active.size);
+            setSeekValue(rotationSeek, active.rotation);
+            setSeekValue(opacitySeek, active.opacity);
+            setSeekValue(camouflageSeek, active.camouflage);
+            borderCheck.setChecked(active.border);
+        };
+
+        Runnable refresh = () -> preview.setImageBitmap(renderEditorBitmap(
+                sourceFrame,
+                imageLayer[0],
+                texts,
+                seekValue(imageSizeSeek),
+                seekValue(imageRotationSeek)));
+
+        preview.setOnTouchListener((view, event) -> {
+            if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                float x = event.getX() / Math.max(1, view.getWidth()) * videoWidth;
+                float y = event.getY() / Math.max(1, view.getHeight()) * videoHeight;
+                if (mode.getCheckedRadioButtonId() == 2) {
+                    if (imageLayer[0] != null) {
+                        imageLayer[0] = removeBackgroundAt(imageLayer[0], (int) x, (int) y, seekValue(bgToleranceSeek));
+                        refresh.run();
+                    }
+                    return true;
+                }
+                TextOverlay hit = findTextOverlay(texts, x, y);
+                if (hit != null) {
+                    selected[0] = hit;
+                    syncTextControls.run();
+                    dragSelected[0] = true;
+                } else {
+                    TextOverlay overlay = new TextOverlay();
+                    overlay.text = textInput.getText().toString();
+                    overlay.x = x;
+                    overlay.y = y;
+                    texts.add(overlay);
+                    selected[0] = overlay;
+                    dragSelected[0] = true;
+                }
+                refresh.run();
+                return true;
+            }
+            if (event.getAction() == MotionEvent.ACTION_MOVE && dragSelected[0] && selected[0] != null) {
+                selected[0].x = event.getX() / Math.max(1, view.getWidth()) * videoWidth;
+                selected[0].y = event.getY() / Math.max(1, view.getHeight()) * videoHeight;
+                refresh.run();
+                return true;
+            }
+            if (event.getAction() == MotionEvent.ACTION_UP) {
+                dragSelected[0] = false;
+                return true;
+            }
+            return true;
+        });
+
+        SeekBar.OnSeekBarChangeListener textRefresh = new SimpleSeekListener(() -> {
+            if (selected[0] != null) {
+                selected[0].text = textInput.getText().toString();
+                selected[0].size = Math.max(8, seekValue(sizeSeek));
+                selected[0].rotation = seekValue(rotationSeek);
+                selected[0].opacity = seekValue(opacitySeek);
+                selected[0].camouflage = seekValue(camouflageSeek);
+                selected[0].border = borderCheck.isChecked();
+            }
+            refresh.run();
+        });
+        sizeSeek.setOnSeekBarChangeListener(textRefresh);
+        rotationSeek.setOnSeekBarChangeListener(textRefresh);
+        opacitySeek.setOnSeekBarChangeListener(textRefresh);
+        camouflageSeek.setOnSeekBarChangeListener(textRefresh);
+        borderCheck.setOnClickListener(v -> textRefresh.onProgressChanged(sizeSeek, sizeSeek.getProgress(), true));
+        textInput.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
+            @Override public void afterTextChanged(android.text.Editable editable) {
+                if (selected[0] != null) {
+                    selected[0].text = editable.toString();
+                    refresh.run();
+                }
+            }
+        });
+        imageSizeSeek.setOnSeekBarChangeListener(new SimpleSeekListener(refresh));
+        imageRotationSeek.setOnSeekBarChangeListener(new SimpleSeekListener(refresh));
+        autoRemove.setOnClickListener(v -> {
+            if (imageLayer[0] != null) {
+                imageLayer[0] = autoRemoveBackground(imageLayer[0], seekValue(bgToleranceSeek));
+                refresh.run();
+            }
+        });
+        duplicateText.setOnClickListener(v -> {
+            if (selected[0] == null) {
+                return;
+            }
+            TextOverlay source = selected[0];
+            TextOverlay copy = new TextOverlay();
+            copy.text = source.text;
+            copy.x = Math.min(videoWidth - 1, source.x + 32);
+            copy.y = Math.min(videoHeight - 1, source.y + 32);
+            copy.size = source.size;
+            copy.rotation = source.rotation;
+            copy.opacity = source.opacity;
+            copy.camouflage = source.camouflage;
+            copy.border = source.border;
+            texts.add(copy);
+            selected[0] = copy;
+            syncTextControls.run();
+            refresh.run();
+        });
+        deleteText.setOnClickListener(v -> {
+            if (selected[0] == null) {
+                return;
+            }
+            texts.remove(selected[0]);
+            selected[0] = null;
+            refresh.run();
+        });
+
+        refresh.run();
         new AlertDialog.Builder(this)
-                .setTitle("Add Text To Frame")
+                .setTitle("Edit Image/Text")
                 .setView(layout)
                 .setNegativeButton("Cancel", null)
-                .setPositiveButton("Apply", (dialog, which) -> {
+                .setPositiveButton("Apply Changes", (dialog, which) -> {
                     try {
-                        applyTextToCurrentFrame(
-                                textInput.getText().toString(),
-                                Math.max(8, sizeSeek.getProgress()),
-                                rotationSeek.getProgress(),
-                                xSeek.getProgress() / 1000.0f,
-                                ySeek.getProgress() / 1000.0f);
+                        Bitmap edited = renderEditorBitmap(sourceFrame, imageLayer[0], texts, seekValue(imageSizeSeek), seekValue(imageRotationSeek));
+                        File editedDir = new File(getFilesDir(), "edited_frames");
+                        if (!editedDir.exists() && !editedDir.mkdirs()) {
+                            throw new IOException("Could not create edited frame folder.");
+                        }
+                        File output = new File(editedDir, "frame_" + currentOutputFrame + ".png");
+                        writePng(edited, output);
+                        replacements.put(key(currentOutputFrame), Uri.fromFile(output));
+                        saveProject();
+                        refreshUi();
+                        setStatus("Applied edited image to frame " + currentOutputFrame + ".");
                     } catch (Exception exc) {
-                        setStatus("Text edit failed: " + exc.getMessage());
+                        setStatus("Image edit failed: " + exc.getMessage());
                     }
                 })
                 .show();
     }
 
-    private void applyTextToCurrentFrame(String text, int size, int rotation, float xRatio, float yRatio) throws Exception {
-        MediaMetadataRetriever retriever = new MediaMetadataRetriever();
-        Bitmap base;
-        try {
-            retriever.setDataSource(this, videoUri);
-            int sourceFrame = sourceFrameForOutput(currentOutputFrame);
-            Uri replacement = replacements.get(key(currentOutputFrame));
-            if (replacement != null) {
-                base = loadBitmap(replacement, videoWidth, videoHeight);
-            } else {
-                base = frameAt(retriever, sourceFrame);
-            }
-        } finally {
-            safeRelease(retriever);
-        }
-        Bitmap edited = base.copy(Bitmap.Config.ARGB_8888, true);
-        Canvas canvas = new Canvas(edited);
-        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        paint.setColor(Color.WHITE);
-        paint.setTextSize(size);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setShadowLayer(4f, 2f, 2f, Color.argb(160, 0, 0, 0));
-        float x = xRatio * edited.getWidth();
-        float y = yRatio * edited.getHeight();
-        canvas.save();
-        canvas.rotate(rotation, x, y);
-        canvas.drawText(text, x, y, paint);
-        canvas.restore();
-
-        File editedDir = new File(getFilesDir(), "edited_frames");
-        if (!editedDir.exists() && !editedDir.mkdirs()) {
-            throw new IOException("Could not create edited frame folder.");
-        }
-        File output = new File(editedDir, "frame_" + currentOutputFrame + ".png");
-        writePng(edited, output);
-        replacements.put(key(currentOutputFrame), Uri.fromFile(output));
-        saveProject();
-        refreshUi();
-        setStatus("Applied text to frame " + currentOutputFrame + ".");
+    private SeekBar seek(LinearLayout layout, String label, int min, int max, int value) {
+        layout.addView(label(label));
+        SeekBar seek = new SeekBar(this);
+        seek.setMax(max - min);
+        seek.setProgress(Math.max(0, Math.min(max - min, value - min)));
+        seek.setTag(min);
+        layout.addView(seek, matchWrap());
+        return seek;
     }
 
+    private int seekValue(SeekBar seek) {
+        Object tag = seek.getTag();
+        int min = tag instanceof Integer ? (Integer) tag : 0;
+        return min + seek.getProgress();
+    }
+
+    private void setSeekValue(SeekBar seek, int value) {
+        Object tag = seek.getTag();
+        int min = tag instanceof Integer ? (Integer) tag : 0;
+        int progress = Math.max(0, Math.min(seek.getMax(), value - min));
+        seek.setProgress(progress);
+    }
+
+    private Bitmap renderEditorBitmap(Bitmap sourceFrame, Bitmap imageLayer, List<TextOverlay> texts, int imageSizeProgress, int imageRotationProgress) {
+        Bitmap edited = sourceFrame.copy(Bitmap.Config.ARGB_8888, true);
+        Canvas canvas = new Canvas(edited);
+        if (imageLayer != null) {
+            Bitmap scaled = fitBitmapToFrame(imageLayer, videoWidth, videoHeight, Math.max(5, imageSizeProgress));
+            canvas.save();
+            canvas.rotate(imageRotationProgress, videoWidth / 2f, videoHeight / 2f);
+            canvas.drawBitmap(scaled, 0, 0, null);
+            canvas.restore();
+        }
+        for (TextOverlay overlay : texts) {
+            drawTextOverlay(canvas, edited, overlay);
+        }
+        return edited;
+    }
+
+    private void drawTextOverlay(Canvas canvas, Bitmap base, TextOverlay overlay) {
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        paint.setTextSize(Math.max(8, overlay.size));
+        int alpha = Math.max(0, Math.min(255, overlay.opacity * 255 / 100));
+        int color = Color.argb(alpha, 255, 255, 255);
+        if (overlay.camouflage > 0) {
+            int sampled = sampleTextColor(base, overlay);
+            color = blendColor(color, sampled, overlay.camouflage / 100.0);
+            color = Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color));
+        }
+        paint.setColor(color);
+        paint.setStyle(Paint.Style.FILL);
+        if (overlay.border) {
+            paint.setShadowLayer(4f, 2f, 2f, Color.argb(alpha, 0, 0, 0));
+        } else {
+            paint.clearShadowLayer();
+        }
+        canvas.save();
+        canvas.rotate(overlay.rotation, overlay.x, overlay.y);
+        canvas.drawText(overlay.text, overlay.x, overlay.y, paint);
+        canvas.restore();
+    }
+
+    private TextOverlay findTextOverlay(List<TextOverlay> texts, float x, float y) {
+        for (int i = texts.size() - 1; i >= 0; i--) {
+            TextOverlay overlay = texts.get(i);
+            RectF bounds = textBounds(overlay);
+            if (bounds.contains(x, y)) {
+                return overlay;
+            }
+        }
+        return null;
+    }
+
+    private RectF textBounds(TextOverlay overlay) {
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        paint.setTextSize(Math.max(8, overlay.size));
+        float width = Math.max(48, paint.measureText(overlay.text));
+        Paint.FontMetrics metrics = paint.getFontMetrics();
+        float height = Math.max(24, metrics.descent - metrics.ascent);
+        return new RectF(overlay.x, overlay.y - height, overlay.x + width, overlay.y + height * 0.35f);
+    }
+
+    private int sampleTextColor(Bitmap bitmap, TextOverlay overlay) {
+        RectF bounds = textBounds(overlay);
+        int left = Math.max(0, (int) bounds.left - 12);
+        int top = Math.max(0, (int) bounds.top - 12);
+        int right = Math.min(bitmap.getWidth() - 1, (int) bounds.right + 12);
+        int bottom = Math.min(bitmap.getHeight() - 1, (int) bounds.bottom + 12);
+        long r = 0, g = 0, b = 0, count = 0;
+        int step = Math.max(1, Math.min(right - left + 1, bottom - top + 1) / 12);
+        for (int yy = top; yy <= bottom; yy += step) {
+            for (int xx = left; xx <= right; xx += step) {
+                int color = bitmap.getPixel(xx, yy);
+                r += Color.red(color);
+                g += Color.green(color);
+                b += Color.blue(color);
+                count++;
+            }
+        }
+        if (count == 0) {
+            return Color.WHITE;
+        }
+        return Color.rgb((int) (r / count), (int) (g / count), (int) (b / count));
+    }
+
+    private int blendColor(int foreground, int sample, double amount) {
+        double keep = 1.0 - amount;
+        return Color.rgb(
+                clampChannel((int) Math.round(Color.red(foreground) * keep + Color.red(sample) * amount)),
+                clampChannel((int) Math.round(Color.green(foreground) * keep + Color.green(sample) * amount)),
+                clampChannel((int) Math.round(Color.blue(foreground) * keep + Color.blue(sample) * amount)));
+    }
+
+    private Bitmap removeBackgroundAt(Bitmap source, int x, int y, int tolerance) {
+        Bitmap bitmap = source.copy(Bitmap.Config.ARGB_8888, true);
+        int width = bitmap.getWidth();
+        int height = bitmap.getHeight();
+        x = Math.max(0, Math.min(width - 1, x));
+        y = Math.max(0, Math.min(height - 1, y));
+        int target = bitmap.getPixel(x, y);
+        boolean[] visited = new boolean[width * height];
+        ArrayDeque<Integer> stack = new ArrayDeque<>();
+        stack.push(y * width + x);
+        while (!stack.isEmpty()) {
+            int index = stack.pop();
+            if (index < 0 || index >= visited.length || visited[index]) {
+                continue;
+            }
+            visited[index] = true;
+            int px = index % width;
+            int py = index / width;
+            int color = bitmap.getPixel(px, py);
+            if (Color.alpha(color) == 0 || colorDistance(color, target) > tolerance) {
+                continue;
+            }
+            bitmap.setPixel(px, py, Color.TRANSPARENT);
+            if (px > 0) stack.push(index - 1);
+            if (px < width - 1) stack.push(index + 1);
+            if (py > 0) stack.push(index - width);
+            if (py < height - 1) stack.push(index + width);
+        }
+        return bitmap;
+    }
+
+    private Bitmap autoRemoveBackground(Bitmap source, int tolerance) {
+        Bitmap bitmap = source.copy(Bitmap.Config.ARGB_8888, true);
+        int width = bitmap.getWidth();
+        int height = bitmap.getHeight();
+        int target = medianEdgeColor(bitmap);
+        boolean[] candidate = new boolean[width * height];
+        ArrayDeque<Integer> stack = new ArrayDeque<>();
+        for (int x = 0; x < width; x++) {
+            seedBackground(bitmap, candidate, stack, x, 0, target, tolerance);
+            seedBackground(bitmap, candidate, stack, x, height - 1, target, tolerance);
+        }
+        for (int y = 0; y < height; y++) {
+            seedBackground(bitmap, candidate, stack, 0, y, target, tolerance);
+            seedBackground(bitmap, candidate, stack, width - 1, y, target, tolerance);
+        }
+        while (!stack.isEmpty()) {
+            int index = stack.pop();
+            if (index < 0 || index >= candidate.length || candidate[index]) {
+                continue;
+            }
+            int px = index % width;
+            int py = index / width;
+            int color = bitmap.getPixel(px, py);
+            if (Color.alpha(color) == 0 || colorDistance(color, target) > tolerance) {
+                continue;
+            }
+            candidate[index] = true;
+            bitmap.setPixel(px, py, Color.TRANSPARENT);
+            if (px > 0) stack.push(index - 1);
+            if (px < width - 1) stack.push(index + 1);
+            if (py > 0) stack.push(index - width);
+            if (py < height - 1) stack.push(index + width);
+        }
+        return bitmap;
+    }
+
+    private void seedBackground(Bitmap bitmap, boolean[] seen, ArrayDeque<Integer> stack, int x, int y, int target, int tolerance) {
+        int width = bitmap.getWidth();
+        int index = y * width + x;
+        if (!seen[index] && colorDistance(bitmap.getPixel(x, y), target) <= tolerance) {
+            stack.push(index);
+        }
+    }
+
+    private int medianEdgeColor(Bitmap bitmap) {
+        int width = bitmap.getWidth();
+        int height = bitmap.getHeight();
+        long r = 0, g = 0, b = 0, count = 0;
+        for (int x = 0; x < width; x++) {
+            int top = bitmap.getPixel(x, 0);
+            int bottom = bitmap.getPixel(x, height - 1);
+            r += Color.red(top) + Color.red(bottom);
+            g += Color.green(top) + Color.green(bottom);
+            b += Color.blue(top) + Color.blue(bottom);
+            count += 2;
+        }
+        for (int y = 0; y < height; y++) {
+            int left = bitmap.getPixel(0, y);
+            int right = bitmap.getPixel(width - 1, y);
+            r += Color.red(left) + Color.red(right);
+            g += Color.green(left) + Color.green(right);
+            b += Color.blue(left) + Color.blue(right);
+            count += 2;
+        }
+        return Color.rgb((int) (r / count), (int) (g / count), (int) (b / count));
+    }
+
+    private double colorDistance(int a, int b) {
+        int dr = Color.red(a) - Color.red(b);
+        int dg = Color.green(a) - Color.green(b);
+        int db = Color.blue(a) - Color.blue(b);
+        return Math.sqrt(dr * dr + dg * dg + db * db);
+    }
+
+    private void replaceEveryXFrames() {
+        if (videoUri == null) {
+            setStatus("Open a video first.");
+            return;
+        }
+        EditText input = new EditText(this);
+        input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        input.setHint("Frame interval");
+        input.setText("10");
+        new AlertDialog.Builder(this)
+                .setTitle("Replace Every X Frames")
+                .setView(input)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Choose Image", (dialog, which) -> {
+                    try {
+                        pendingRepeatInterval = Math.max(1, Integer.parseInt(input.getText().toString()));
+                        pick(PICK_REPEAT_REPLACEMENT, "image/*");
+                    } catch (Exception exc) {
+                        setStatus("Enter a valid frame interval.");
+                    }
+                })
+                .show();
+    }
+
+    private void applyRepeatedReplacement(Uri uri) {
+        if (pendingRepeatInterval <= 0) {
+            return;
+        }
+        int count = 0;
+        for (int outputFrame = currentOutputFrame; outputFrame < outputFrameCount(); outputFrame += pendingRepeatInterval) {
+            replacements.put(key(outputFrame), uri);
+            count++;
+        }
+        pendingRepeatInterval = 0;
+        saveProject();
+        refreshUi();
+        setStatus("Replaced " + count + " frames from frame " + currentOutputFrame + ".");
+    }
     private int outputFrameCount() {
         return Math.max(1, frameCount * SLOT_COUNT);
     }
@@ -592,7 +999,7 @@ public class MainActivity extends Activity {
             return;
         }
         exporting = true;
-        progress.setMax(frameCount);
+        progress.setMax(outputFrameCount());
         progress.setProgress(0);
         setStatus("Export started...");
         new Thread(() -> {
@@ -622,34 +1029,36 @@ public class MainActivity extends Activity {
         MediaMetadataRetriever retriever = new MediaMetadataRetriever();
         retriever.setDataSource(this, videoUri);
         int outputIndex = 0;
+        int totalOutputFrames = outputFrameCount();
+        runOnUiThread(() -> progress.setMax(totalOutputFrames));
         try {
-            for (int frame = 0; frame < frameCount; frame++) {
-                Bitmap source = frameAt(retriever, frame);
-                Bitmap previous = frameAt(retriever, Math.max(0, frame - 1));
-                Bitmap next = frameAt(retriever, Math.min(frameCount - 1, frame + 1));
-                for (int slot = 0; slot < SLOT_COUNT; slot++) {
-                    int outputFrame = frame * SLOT_COUNT + slot;
-                    Bitmap out = source;
-                    Uri replacement = replacements.get(key(outputFrame));
-                    if (replacement != null) {
-                        out = loadBitmap(replacement, videoWidth, videoHeight);
-                        if (colorBlendCheck.isChecked()) {
-                            out = colorBlend(
-                                    out,
-                                    previous,
-                                    next,
-                                    colorBlendSeek.getProgress() / 100.0,
-                                    frequencyBlendSeek.getProgress() / 100.0);
-                        }
+            for (int outputFrame = 0; outputFrame < totalOutputFrames; outputFrame++) {
+                int sourceFrame = sourceFrameForOutput(outputFrame);
+                Bitmap source = frameAt(retriever, sourceFrame);
+                Bitmap out = source;
+                Uri replacement = replacements.get(key(outputFrame));
+                if (replacement != null) {
+                    out = loadBitmap(replacement, videoWidth, videoHeight);
+                    if (colorBlendCheck.isChecked()) {
+                        Bitmap previous = frameAt(retriever, sourceFrameForOutput(Math.max(0, outputFrame - 1)));
+                        Bitmap next = frameAt(retriever, sourceFrameForOutput(Math.min(totalOutputFrames - 1, outputFrame + 1)));
+                        out = colorBlend(
+                                out,
+                                previous,
+                                next,
+                                colorBlendSeek.getProgress() / 100.0,
+                                frequencyBlendSeek.getProgress() / 100.0);
                     }
-                    File frameFile = new File(framesDir, String.format(Locale.US, "frame_%08d.png", outputIndex++));
-                    writePng(out, frameFile);
                 }
-                int done = frame + 1;
-                runOnUiThread(() -> {
-                    progress.setProgress(done);
-                    setStatus("Rendered frame " + done + " of " + frameCount);
-                });
+                File frameFile = new File(framesDir, String.format(Locale.US, "frame_%08d.png", outputIndex++));
+                writePng(out, frameFile);
+                int done = outputFrame + 1;
+                if (done % 10 == 0 || done == totalOutputFrames) {
+                    runOnUiThread(() -> {
+                        progress.setProgress(done);
+                        setStatus("Rendered output frame " + done + " of " + totalOutputFrames);
+                    });
+                }
             }
         } finally {
             safeRelease(retriever);
@@ -1115,6 +1524,28 @@ public class MainActivity extends Activity {
         file.delete();
     }
 
+    private static class TextOverlay {
+        String text = "Text";
+        float x;
+        float y;
+        int size = 64;
+        int rotation = 0;
+        int opacity = 100;
+        int camouflage = 0;
+        boolean border = false;
+    }
+
+    private static class SimpleSeekListener implements SeekBar.OnSeekBarChangeListener {
+        private final Runnable callback;
+        SimpleSeekListener(Runnable callback) {
+            this.callback = callback;
+        }
+        @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+            callback.run();
+        }
+        @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+        @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+    }
     private static class FloatArray {
         final float[] data;
         final int size;

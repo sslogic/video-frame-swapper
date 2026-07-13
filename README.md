@@ -23,7 +23,11 @@ The project has two versions:
 - Move through an output-frame timeline.
 - Replace one frame with an image.
 - Restore the last Android project when the app opens.
-- Add text to a selected frame with size, rotation, and X/Y placement controls.
+- Edit a selected frame with an image/text editor.
+- Keep imported images aspect-fit by default, then resize or rotate them on the canvas.
+- Add movable text with size, rotation, opacity, optional border, and camouflage color matching.
+- Remove image backgrounds by tapping the image layer or using auto background removal.
+- Replace a frame every X output frames from the current timeline position.
 - Export a same-length MP4 with four frames for every original frame.
 - Keep the original audio when possible.
 - Add a second music track.
@@ -157,16 +161,17 @@ The local JDK and Gradle download folders are ignored by git. They are not part 
 2. Tap `Open Video`.
 3. Pick a video.
 4. Use the output-frame timeline to choose the exact frame.
-5. Tap `Replace Frame` to choose an image.
-6. Tap `Edit Text` to add text to the selected frame.
-7. Set text size, rotation, and X/Y placement, then apply it.
-8. Turn color blending on or off.
-9. Set `Color Blend Strength` and `Image Frequency Blend`.
-10. Tap `Add Music` if you want an extra track.
-11. Set `Original Soundtrack Volume` and `Added Music Volume`.
-12. Leave key matching enabled if you want the added music pitch-shifted to match the original audio.
-13. Tap `Save Folder` and choose where the MP4 should be written.
-14. Tap `Export To Chosen Folder`.
+5. Tap `Replace Frame` to choose an image for the selected output frame.
+6. Tap `Edit Image/Text` to resize or rotate the image, remove its background, add movable text, and apply the edited frame.
+7. Tap in the editor preview to place text. Drag selected text to move it, duplicate it, delete it, then use the sliders for size, rotation, opacity, and camouflage.
+8. Tap `Replace Every X` to use one image every chosen number of output frames from the current timeline position.
+9. Turn color blending on or off.
+10. Set `Color Blend Strength` and `Image Frequency Blend`.
+11. Tap `Add Music` if you want an extra track.
+12. Set `Original Soundtrack Volume` and `Added Music Volume`.
+13. Leave key matching enabled if you want the added music pitch-shifted to match the original audio.
+14. Tap `Save Folder` and choose where the MP4 should be written.
+15. Tap `Export To Chosen Folder`.
 
 The Android app saves the current project locally. When you open the app again it restores the last video, music track, save folder, swapped frames, edited text frames, and slider settings when Android still has access to those files.
 
