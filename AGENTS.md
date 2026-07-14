@@ -19,8 +19,10 @@
 
 - The desktop editor runs from `run_editor.bat` with the local `.venv`.
 - The desktop editor supports multiple independent windows through the `New Window` button.
+- The `Edit Frame` button opens the current video frame directly; image import stays on the separate `Import Image` button.
+- When the selected frame already has a saved replacement, `Edit Frame` uses that replacement image as the editable base frame.
 - Use the bundled `imageio-ffmpeg` executable for desktop export behavior.
-- Desktop export streams raw frames directly into FFmpeg, tests GPU H.264 encoders first, and falls back to CPU `libx264`.
+- Desktop export writes a temporary silent MP4 first, then uses FFmpeg to mux source and added audio tracks into the final export.
 - Exclude generated dependencies, build outputs, local JDK/Gradle distributions, backups, and media artifacts from source-structure decisions.
 
 # Verification
